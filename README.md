@@ -9,8 +9,9 @@ name shows up in waybar and `swaysome focus N` keeps working unchanged.
 
     sway-context switch [name]   menu of contexts; pick one, or type a new name to create it
     sway-context new [name]      create a context in a free slot and switch to it
-    sway-context name [name]     name or rename the current slot; whatever is on its workspaces
-                                 (on any work output) becomes the context. Aliases: rename, adopt
+    sway-context name [name]     name the current slot as a new context (switches all work outputs to it,
+                                 claiming whatever is on those workspaces), or rename an existing one.
+                                 Aliases: rename, adopt
     sway-context close [name] [--kill]
                                  forget a context; with --kill also close its windows
     sway-context list            show slots, names, window counts

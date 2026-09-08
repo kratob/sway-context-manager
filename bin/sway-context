@@ -296,13 +296,18 @@ module SwayContext
     # on any work output, becomes part of the context.
     def cmd_name(name = nil)
       slot = current_slot
-      prompt = contexts.key?(slot) ? "rename context" : "name context"
-      name ||= menu([], prompt: prompt, filter: contexts[slot]) or return
+      renaming = contexts.key?(slot)
+      name ||= menu([], prompt: renaming ? "rename context" : "name context", filter: contexts[slot]) or return
       name = validate_name!(name)
       other = context_by_name(name)
       raise Error, "context #{name.inspect} already exists in slot #{other}" if other && other != slot
       contexts[slot] = name
-      apply_names(slot, name)
+      if renaming
+        apply_names(slot, name)
+      else
+        # A fresh context: bring up and name the slot on every work output.
+        focus_slot(slot, name)
+      end
       save_state
       puts "#{slot}  #{name}"
     end
@@ -336,8 +341,8 @@ module SwayContext
 
       switch [name]     menu of contexts; pick one or type a new name to create it
       new [name]        create a context in a free slot and switch to it
-      name [name]       name or rename the current slot; existing windows on it become the context
-                        (aliases: rename, adopt)
+      name [name]       name the current slot as a new context (switching all work outputs to it),
+                        or rename an existing one (aliases: rename, adopt)
       close [name] [--kill]
                         forget a context; with --kill also close its windows
       list              show slots, names and window counts
