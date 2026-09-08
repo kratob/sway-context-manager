@@ -43,6 +43,8 @@ Keys (see `sway/context.conf`): `$mod+x` switch or create, `$mod+Shift+x` close 
 - Slot is free when no context has it and no workspace `<group>N` exists on any work output.
 - Switching focuses `workspace number <group>N` on each work output, then renames the
   workspaces to `<group>N:<name>`. Focus returns to the work output you came from.
+- Contexts with no windows left are dropped automatically when you switch or create a context.
+  The context you are currently on is only dropped once you have left it.
 - Moving windows between contexts is just `swaysome move N` as before.
 
 ## Later

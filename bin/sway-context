@@ -217,6 +217,16 @@ module SwayContext
       @workspaces = @outputs = @windows = nil
     end
 
+    # Drop contexts that have no windows left (except slots listed in `keep`).
+    def prune_empty(keep: [])
+      contexts.keys.each do |slot|
+        next if keep.include?(slot) || window_count(slot) > 0
+        contexts.delete(slot)
+        apply_names(slot, nil)
+        warn "dropped empty context in slot #{slot}"
+      end
+    end
+
     # ----- menu --------------------------------------------------------------
 
     def menu(lines, prompt:, filter: nil)
@@ -259,6 +269,10 @@ module SwayContext
     end
 
     def cmd_switch(name = nil)
+      from = current_slot
+      # Contexts without windows are meaningless; drop them before offering them.
+      # The current slot is kept until we have actually left it.
+      prune_empty(keep: [from])
       if name.nil?
         lines = contexts.sort.map { |slot, n| menu_line(slot, n) }
         choice = menu(lines, prompt: "context")
@@ -275,10 +289,12 @@ module SwayContext
         slot = context_by_name(name) or raise Error, "no context named #{name.inspect}"
       end
       focus_slot(slot, contexts[slot])
+      prune_empty(keep: [slot]) if from != slot
       save_state
     end
 
     def cmd_new(name = nil)
+      prune_empty(keep: [current_slot]) # frees slots held by stale contexts
       name ||= menu([], prompt: "new context") or return
       name = validate_name!(name)
       if (slot = context_by_name(name))
@@ -288,6 +304,7 @@ module SwayContext
         contexts[slot] = name
       end
       focus_slot(slot, name)
+      prune_empty(keep: [slot])
       save_state
       puts "#{slot}  #{name}"
     end
