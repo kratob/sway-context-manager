@@ -19,8 +19,22 @@ module SwayContext
   GROUP_SIZE  = 10 # swaysome: workspace number = output_group * 10 + slot
 
   DEFAULT_CONFIG = {
-    # Outputs that do not take part in contexts (sway output names).
-    "ambient_outputs" => ["eDP-1"],
+    # Outputs that do not take part in contexts. Outputs are indexed by
+    # position, left to right, starting at 0; -1 is the rightmost one.
+    # Sway output names (strings) are accepted as well.
+    "ambient_outputs" => [0],
+    # Templates applied when a context is created. The first whose regexp
+    # matches the context name wins. Output keys are position indexes as
+    # above. Arguments may use {name} (context name) and {rest} (name after
+    # the match), and a leading ~ is expanded.
+    #   { "match" => "^proj-",
+    #     "outputs" => {
+    #       "1" => { "launch" => [["zed", "~/src/myproject"]], "layout" => "stacking" },
+    #       "2" => { "launch" => [["google-chrome", "--new-window", "https://…/{rest}"]] } } }
+    "templates" => [],
+    # Seconds to wait for a launched application's window before giving up
+    # on placing it.
+    "launch_timeout" => 15,
     # Command used for menus and prompts. Must read choices on stdin and
     # print the chosen (or typed) line on stdout, like rofi -dmenu.
     "menu" => ["rofi", "-dmenu", "-i"],
@@ -67,7 +81,66 @@ module SwayContext
     end
   end
 
-  Output = Struct.new(:name, :group, :focused, :current_num, keyword_init: true)
+  # Starts applications and moves the window each one opens to a target
+  # workspace, by listening to sway's window events. Launching one at a time
+  # and moving the window explicitly makes placement independent of which
+  # workspace happens to be focused when the app finally maps its window.
+  class Launcher
+    def initialize(sway, timeout:)
+      @sway = sway
+      @timeout = timeout
+      @events, @thread = nil
+    end
+
+    def launch(argv, target_num)
+      subscribe
+      drain
+      pid = Process.spawn(*argv, in: File::NULL, out: File::NULL, err: File::NULL, pgroup: true)
+      Process.detach(pid)
+      if (event = wait_for_new_window)
+        id = event["container"]["id"]
+        @sway.run("[con_id=#{id}] move container to workspace number #{target_num}")
+      else
+        warn "sway-context: no window appeared within #{@timeout}s for #{argv.join(' ')}; leaving it where it opens"
+      end
+    end
+
+    def close
+      Process.kill("TERM", @thread.pid) if @thread&.alive?
+      @events&.close
+    rescue Errno::ESRCH, IOError
+      nil
+    end
+
+    private
+
+    def subscribe
+      return if @events
+      _stdin, @events, @thread = Open3.popen2("swaymsg", "-r", "-t", "subscribe", "-m", '["window"]')
+      _stdin.close
+    end
+
+    # Discard events that arrived before the launch (e.g. from earlier apps).
+    def drain
+      @events.read_nonblock(1 << 16) while IO.select([@events], nil, nil, 0)
+    rescue IO::WaitReadable, EOFError
+      nil
+    end
+
+    def wait_for_new_window
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @timeout
+      loop do
+        remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        return nil if remaining <= 0 || !IO.select([@events], nil, nil, remaining)
+        line = @events.gets or return nil
+        event = JSON.parse(line) rescue next
+        return event if event["change"] == "new"
+      end
+    end
+  end
+
+  # position: index among active outputs sorted left to right (0-based).
+  Output = Struct.new(:name, :group, :focused, :current_num, :position, keyword_init: true)
   Workspace = Struct.new(:num, :name, :output, :visible, :focused, keyword_init: true) do
     def slot = num % GROUP_SIZE
     def group = num / GROUP_SIZE
@@ -99,15 +172,25 @@ module SwayContext
       end
     end
 
+    # All active outputs, sorted left to right (then top to bottom).
     def outputs
-      @outputs ||= sway.outputs.map do |o|
-        current = workspaces.find { |w| w.name == o["current_workspace"] }
-        Output.new(name: o["name"], focused: o["focused"],
-                   current_num: current&.num, group: current&.group)
-      end
+      @outputs ||= sway.outputs
+        .sort_by { |o| [o["rect"]["x"], o["rect"]["y"]] }
+        .each_with_index.map do |o, i|
+          current = workspaces.find { |w| w.name == o["current_workspace"] }
+          Output.new(name: o["name"], focused: o["focused"], position: i,
+                     current_num: current&.num, group: current&.group)
+        end
     end
 
-    def ambient?(output) = config["ambient_outputs"].include?(output.name)
+    # Output by position index; negative counts from the right.
+    def output_at(index) = outputs[index]
+
+    def ambient?(output)
+      config["ambient_outputs"].any? do |spec|
+        spec.is_a?(Integer) ? output_at(spec)&.name == output.name : spec == output.name
+      end
+    end
 
     def work_outputs
       outs = outputs.reject { |o| ambient?(o) || o.group.nil? }.sort_by(&:group)
@@ -217,6 +300,50 @@ module SwayContext
       @workspaces = @outputs = @windows = nil
     end
 
+    # ----- templates ---------------------------------------------------------
+
+    # [template, match_data] for the first template matching the name, or nil.
+    def template_for(name)
+      config["templates"].each do |tpl|
+        m = Regexp.new(tpl["match"]).match(name)
+        return [tpl, m] if m
+      end
+      nil
+    end
+
+    def expand_arg(arg, name, match)
+      arg = arg.gsub("{name}", name).gsub("{rest}", name[match.end(0)..])
+      arg.start_with?("~/") || arg == "~" ? File.expand_path(arg) : arg
+    end
+
+    # Apply the matching template (if any) to a freshly created context. Assumes
+    # focus_slot has just shown the slot on every work output.
+    def run_template(slot, name)
+      tpl, match = template_for(name)
+      return unless tpl
+      focused = outputs.find(&:focused)
+      launcher = Launcher.new(sway, timeout: config["launch_timeout"])
+      tpl.fetch("outputs", {}).each do |index, opts|
+        out = output_at(Integer(index))
+        if out.nil? || ambient?(out)
+          warn "sway-context: template output #{index} is #{out ? 'ambient' : 'not connected'}, skipping"
+          next
+        end
+        num = out.group * GROUP_SIZE + slot
+        if (layout = opts["layout"])
+          sway.run("focus output #{out.name}")
+          sway.run("workspace number #{num}")
+          sway.run("layout #{layout}")
+        end
+        opts.fetch("launch", []).each do |argv|
+          launcher.launch(argv.map { |a| expand_arg(a, name, match) }, num)
+        end
+      end
+      sway.run("focus output #{focused.name}") if focused
+    ensure
+      launcher&.close
+    end
+
     # Drop contexts that have no windows left (except slots listed in `keep`).
     def prune_empty(keep: [])
       contexts.keys.each do |slot|
@@ -297,16 +424,19 @@ module SwayContext
       prune_empty(keep: [current_slot]) # frees slots held by stale contexts
       name ||= menu([], prompt: "new context") or return
       name = validate_name!(name)
+      created = false
       if (slot = context_by_name(name))
         warn "context #{name.inspect} already exists in slot #{slot}, switching to it"
       else
         slot = free_slot
         contexts[slot] = name
+        created = true
       end
       focus_slot(slot, name)
       prune_empty(keep: [slot])
       save_state
       puts "#{slot}  #{name}"
+      run_template(slot, name) if created
     end
 
     # Name (or rename) the current slot. Whatever is on the slot's workspaces,
@@ -327,6 +457,7 @@ module SwayContext
       end
       save_state
       puts "#{slot}  #{name}"
+      run_template(slot, name) unless renaming
     end
     
     def cmd_close(*args)

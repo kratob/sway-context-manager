@@ -1,5 +1,19 @@
 {
-  "ambient_outputs": ["eDP-1"],
+  "ambient_outputs": [0],
   "menu": ["rofi", "-dmenu", "-i"],
-  "slots": [1, 2, 3, 4, 5, 6, 7, 8, 9, 0]
+  "slots": [1, 2, 3, 4, 5, 6, 7, 8, 9, 0],
+  "launch_timeout": 15,
+  "templates": [
+    {
+      "match": "^proj-",
+      "outputs": {
+        "1": {
+          "launch": [["zed", "~/src/myproject"]]
+        },
+        "2": {
+          "launch": [["google-chrome", "--new-window", "https://tracker.example.com/issues/{name}"]]
+        }
+      }
+    }
+  ]
 }

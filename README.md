@@ -30,6 +30,36 @@ Without an argument, `switch`, `new` and `name` prompt via rofi.
 Keys (see `sway/context.conf`): `$mod+x` switch or create, `$mod+Shift+x` close current (windows stay),
 `$mod+Control+x` name or rename the current slot.
 
+## Outputs
+
+Outputs are addressed by position: all active outputs sorted left to right, index 0
+being the leftmost and -1 the rightmost. `ambient_outputs` lists the indexes (or sway
+output names) that do not take part in contexts; every other output is a work output.
+
+## Templates
+
+A template launches applications when a context is *created* (`new`, a new name typed
+into the switcher, or `name` on an unnamed slot). Not on `switch` or rename.
+
+    "templates": [
+      {
+        "match": "^proj-",
+        "outputs": {
+          "1":  { "launch": [["zed", "~/src/myproject"]], "layout": "stacking" },
+          "-1": { "launch": [["google-chrome", "--new-window", "https://…/{name}"]] }
+        }
+      }
+    ]
+
+- `match` is a regexp against the context name; the first matching template wins.
+- `outputs` keys are output position indexes (see above). Ambient or missing outputs are skipped.
+- `launch` is a list of argv arrays. `{name}` is the context name, `{rest}` the part after
+  the match (`proj-1234` → `1234`); a leading `~` is expanded.
+- `layout` runs `layout <mode>` on the (empty) workspace before launching.
+- Apps are launched one at a time; the next new window sway reports is moved to the
+  target workspace, so placement does not depend on focus or startup time
+  (`launch_timeout` seconds per app).
+
 ## Files
 
 - config: `~/.config/sway-context/config.json` (`SWAY_CONTEXT_CONFIG` overrides)
