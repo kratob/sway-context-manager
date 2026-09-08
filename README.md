@@ -76,7 +76,3 @@ into the switcher, or `name` on an unnamed slot). Not on `switch` or rename.
 - Contexts with no windows left are dropped automatically when you switch or create a context.
   The context you are currently on is only dropped once you have left it.
 - Moving windows between contexts is just `swaysome move N` as before.
-
-## Later
-
-- Per-context app templates (terminal in project dir, editor, ...).
