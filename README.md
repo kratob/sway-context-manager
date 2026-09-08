@@ -1,4 +1,4 @@
-# sway-context
+# WIP: sway-context
 
 Named "contexts" for sway + swaysome. A context is a swaysome slot `N` (0-9)
 with a name. On every *work* output (every active output that is not listed
