@@ -336,8 +336,8 @@ module SwayContext
 
       switch [name]     menu of contexts; pick one or type a new name to create it
       new [name]        create a context in a free slot and switch to it
-      rename [name]     rename the current context (or name an unnamed slot)
-      adopt [name]      make the focused workspace a context (in place, or moved to a free slot)
+      name [name]       name or rename the current slot; existing windows on it become the context
+                        (aliases: rename, adopt)
       close [name] [--kill]
                         forget a context; with --kill also close its windows
       list              show slots, names and window counts
@@ -354,8 +354,7 @@ module SwayContext
     case cmd
     when "switch"  then m.cmd_switch(*args)
     when "new"     then m.cmd_new(*args)
-    when "rename"  then m.cmd_rename(*args)
-    when "adopt"   then m.cmd_adopt(*args)
+    when "name", "rename", "adopt" then m.cmd_name(*args)
     when "close"   then m.cmd_close(*args)
     when "list"    then m.cmd_list
     when "current" then m.cmd_current
