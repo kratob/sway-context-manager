@@ -292,9 +292,12 @@ module SwayContext
       puts "#{slot}  #{name}"
     end
 
-    def cmd_rename(name = nil)
+    # Name (or rename) the current slot. Whatever is on the slot's workspaces,
+    # on any work output, becomes part of the context.
+    def cmd_name(name = nil)
       slot = current_slot
-      name ||= menu([], prompt: "rename context", filter: contexts[slot]) or return
+      prompt = contexts.key?(slot) ? "rename context" : "name context"
+      name ||= menu([], prompt: prompt, filter: contexts[slot]) or return
       name = validate_name!(name)
       other = context_by_name(name)
       raise Error, "context #{name.inspect} already exists in slot #{other}" if other && other != slot
@@ -303,39 +306,7 @@ module SwayContext
       save_state
       puts "#{slot}  #{name}"
     end
-
-    # Turn the focused workspace into a context. If the rest of its slot is
-    # empty and unnamed, name the slot in place. Otherwise move the focused
-    # workspace's windows to a fresh slot, so unrelated windows on the other
-    # work output are left alone.
-    def cmd_adopt(name = nil)
-      ws = workspaces.find(&:focused) or raise Error, "no focused workspace"
-      raise Error, "workspace #{ws.name} is on an ambient output" unless work_groups.include?(ws.group)
-      windows = windows_by_workspace[ws.num]
-      raise Error, "workspace #{ws.name} has no windows" if windows.empty?
-
-      name ||= menu([], prompt: "adopt #{ws.name} as context") or return
-      name = validate_name!(name)
-      raise Error, "context #{name.inspect} already exists in slot #{context_by_name(name)}" if context_by_name(name)
-
-      others = work_workspaces(ws.slot) - [ws]
-      if !contexts.key?(ws.slot) && others.all? { |w| windows_by_workspace[w.num].empty? }
-        slot = ws.slot
-        contexts[slot] = name
-        apply_names(slot, name)
-        puts "#{slot}  #{name}  (named in place)"
-      else
-        slot = free_slot
-        target = ws.group * GROUP_SIZE + slot
-        windows.each { |id| sway.run("[con_id=#{id}] move container to workspace number #{target}") }
-        contexts[slot] = name
-        refresh!
-        focus_slot(slot, name)
-        puts "#{slot}  #{name}  (moved #{windows.size} windows from #{ws.name})"
-      end
-      save_state
-    end
-
+    
     def cmd_close(*args)
       kill = args.delete("--kill")
       name = args.first

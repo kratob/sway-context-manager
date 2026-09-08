@@ -9,16 +9,15 @@ name shows up in waybar and `swaysome focus N` keeps working unchanged.
 
     sway-context switch [name]   menu of contexts; pick one, or type a new name to create it
     sway-context new [name]      create a context in a free slot and switch to it
-    sway-context rename [name]   rename the current context (or name an unnamed slot)
-    sway-context adopt [name]    make the focused workspace a context: names the slot in place if the
-                                 rest of the slot is empty, otherwise moves its windows to a free slot
+    sway-context name [name]     name or rename the current slot; whatever is on its workspaces
+                                 (on any work output) becomes the context. Aliases: rename, adopt
     sway-context close [name] [--kill]
                                  forget a context; with --kill also close its windows
     sway-context list            show slots, names, window counts
     sway-context current         print the current context name (for bars)
     sway-context sync            re-apply stored names after a sway restart
 
-Without an argument, `switch`, `new` and `rename` prompt via rofi.
+Without an argument, `switch`, `new` and `name` prompt via rofi.
 
 ## Install
 
@@ -28,7 +27,7 @@ Without an argument, `switch`, `new` and `rename` prompt via rofi.
     swaymsg reload
 
 Keys (see `sway/context.conf`): `$mod+x` switch or create, `$mod+Shift+x` close current (windows stay),
-`$mod+Control+x` adopt focused workspace, `$mod+Control+Shift+x` rename.
+`$mod+Control+x` name or rename the current slot.
 
 ## Files
 
