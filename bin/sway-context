@@ -311,8 +311,10 @@ module SwayContext
       nil
     end
 
+    # {name}: context name, {rest}: name after the match, {1}..{9}: capture groups.
     def expand_arg(arg, name, match)
       arg = arg.gsub("{name}", name).gsub("{rest}", name[match.end(0)..])
+      arg = arg.gsub(/\{(\d)\}/) { match[Integer($1)].to_s }
       arg.start_with?("~/") || arg == "~" ? File.expand_path(arg) : arg
     end
 

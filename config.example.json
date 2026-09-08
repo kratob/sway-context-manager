@@ -1,17 +1,67 @@
 {
-  "ambient_outputs": [0],
-  "menu": ["rofi", "-dmenu", "-i"],
-  "slots": [1, 2, 3, 4, 5, 6, 7, 8, 9, 0],
+  "ambient_outputs": [
+    0
+  ],
+  "menu": [
+    "rofi",
+    "-dmenu",
+    "-i"
+  ],
+  "slots": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    0
+  ],
   "launch_timeout": 15,
   "templates": [
+    {
+      "match": "^proj-(\\d+)$",
+      "outputs": {
+        "1": {
+          "launch": [
+            [
+              "zed",
+              "~/src/myproject"
+            ]
+          ]
+        },
+        "-1": {
+          "launch": [
+            [
+              "google-chrome",
+              "--new-window",
+              "https://tracker.example.com/issues/PROJ-{1}"
+            ]
+          ]
+        }
+      }
+    },
     {
       "match": "^proj-",
       "outputs": {
         "1": {
-          "launch": [["zed", "~/src/myproject"]]
+          "launch": [
+            [
+              "zed",
+              "~/src/myproject"
+            ]
+          ]
         },
-        "2": {
-          "launch": [["google-chrome", "--new-window", "https://tracker.example.com/issues/{name}"]]
+        "-1": {
+          "launch": [
+            [
+              "google-chrome",
+              "--new-window",
+              "https://tracker.example.com/projects/PROJ"
+            ]
+          ]
         }
       }
     }

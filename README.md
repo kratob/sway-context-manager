@@ -54,7 +54,7 @@ into the switcher, or `name` on an unnamed slot). Not on `switch` or rename.
 - `match` is a regexp against the context name; the first matching template wins.
 - `outputs` keys are output position indexes (see above). Ambient or missing outputs are skipped.
 - `launch` is a list of argv arrays. `{name}` is the context name, `{rest}` the part after
-  the match (`proj-1234` → `1234`); a leading `~` is expanded.
+  the match (`proj-1234` → `1234`), `{1}`..`{9}` are regexp capture groups; a leading `~` is expanded.
 - `layout` runs `layout <mode>` on the (empty) workspace before launching.
 - Apps are launched one at a time; the next new window sway reports is moved to the
   target workspace, so placement does not depend on focus or startup time
