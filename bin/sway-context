@@ -1,0 +1,403 @@
+#!/usr/bin/env -S mise exec -- ruby
+# frozen_string_literal: true
+
+# sway-context: named "contexts" spanning all work outputs in sway + swaysome.
+#
+# A context is a swaysome slot N (0..9) with a name. On every work output
+# (every active output that is not an ambient output) the workspace with
+# number <group>N is renamed to "<group>N:<name>", so the name shows up in
+# the bar and survives as long as the workspace has windows. A small state
+# file remembers names for slots whose workspaces are currently empty.
+
+require "json"
+require "open3"
+require "fileutils"
+
+module SwayContext
+  CONFIG_PATH = File.expand_path(ENV.fetch("SWAY_CONTEXT_CONFIG", "~/.config/sway-context/config.json"))
+  STATE_PATH  = File.expand_path(ENV.fetch("SWAY_CONTEXT_STATE", "~/.local/state/sway-context/contexts.json"))
+  GROUP_SIZE  = 10 # swaysome: workspace number = output_group * 10 + slot
+
+  DEFAULT_CONFIG = {
+    # Outputs that do not take part in contexts (sway output names).
+    "ambient_outputs" => ["eDP-1"],
+    # Command used for menus and prompts. Must read choices on stdin and
+    # print the chosen (or typed) line on stdout, like rofi -dmenu.
+    "menu" => ["rofi", "-dmenu", "-i"],
+    # Slots handed out to new contexts, in order of preference.
+    "slots" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 0],
+  }.freeze
+
+  class Error < StandardError; end
+
+  # Thin wrapper around swaymsg.
+  class Sway
+    def run(command)
+      out, err, status = Open3.capture3("swaymsg", command)
+      raise Error, "swaymsg #{command.inspect} failed: #{err.strip} #{out.strip}" unless status.success?
+      results = JSON.parse(out) rescue []
+      failed = results.find { |r| r["success"] == false }
+      raise Error, "swaymsg #{command.inspect}: #{failed["error"]}" if failed
+      out
+    end
+
+    def get(type)
+      out, err, status = Open3.capture3("swaymsg", "-t", "get_#{type}")
+      raise Error, "swaymsg -t get_#{type} failed: #{err.strip}" unless status.success?
+      JSON.parse(out)
+    end
+
+    def outputs    = get(:outputs).select { |o| o["active"] }
+    def workspaces = get(:workspaces)
+    def tree       = get(:tree)
+
+    # Window container ids per workspace num, derived from the tree.
+    def windows_by_workspace
+      windows = Hash.new { |h, k| h[k] = [] }
+      walk = lambda do |node, ws_num|
+        ws_num = node["num"] if node["type"] == "workspace"
+        children = node.fetch("nodes", []) + node.fetch("floating_nodes", [])
+        if children.empty? && ws_num && %w[con floating_con].include?(node["type"])
+          windows[ws_num] << node["id"]
+        end
+        children.each { |c| walk.call(c, ws_num) }
+      end
+      walk.call(tree, nil)
+      windows
+    end
+  end
+
+  Output = Struct.new(:name, :group, :focused, :current_num, keyword_init: true)
+  Workspace = Struct.new(:num, :name, :output, :visible, :focused, keyword_init: true) do
+    def slot = num % GROUP_SIZE
+    def group = num / GROUP_SIZE
+    # The part after the first colon, if any.
+    def context_name
+      name.split(":", 2)[1]
+    end
+  end
+
+  class Manager
+    attr_reader :config, :sway
+
+    def initialize(sway: Sway.new, config: load_config)
+      @sway = sway
+      @config = config
+    end
+
+    # ----- model -------------------------------------------------------------
+
+    def load_config
+      return DEFAULT_CONFIG.dup unless File.exist?(CONFIG_PATH)
+      DEFAULT_CONFIG.merge(JSON.parse(File.read(CONFIG_PATH)))
+    end
+
+    def workspaces
+      @workspaces ||= sway.workspaces.map do |w|
+        Workspace.new(num: w["num"], name: w["name"], output: w["output"],
+                      visible: w["visible"], focused: w["focused"])
+      end
+    end
+
+    def outputs
+      @outputs ||= sway.outputs.map do |o|
+        current = workspaces.find { |w| w.name == o["current_workspace"] }
+        Output.new(name: o["name"], focused: o["focused"],
+                   current_num: current&.num, group: current&.group)
+      end
+    end
+
+    def ambient?(output) = config["ambient_outputs"].include?(output.name)
+
+    def work_outputs
+      outs = outputs.reject { |o| ambient?(o) || o.group.nil? }.sort_by(&:group)
+      raise Error, "no work outputs found (all outputs are ambient or have no numbered workspace)" if outs.empty?
+      outs
+    end
+
+    def work_groups = work_outputs.map(&:group)
+
+    def work_workspaces(slot) = workspaces.select { |w| w.slot == slot && work_groups.include?(w.group) }
+
+    # slot => name. Live workspace names win over the state file.
+    def contexts
+      @contexts ||= begin
+        ctx = load_state
+        work_workspaces_all = workspaces.select { |w| work_groups.include?(w.group) }
+        work_workspaces_all.each do |w|
+          name = w.context_name
+          ctx[w.slot] = name if name && !name.empty?
+        end
+        # Forget names whose workspaces exist but are all unnamed (renamed away manually).
+        ctx.delete_if do |slot, _|
+          wss = work_workspaces(slot)
+          !wss.empty? && wss.none?(&:context_name)
+        end
+        ctx
+      end
+    end
+
+    def context_by_name(name) = contexts.find { |_, n| n == name }&.first
+
+    def windows_by_workspace
+      @windows ||= sway.windows_by_workspace
+    end
+
+    def window_count(slot)
+      work_workspaces(slot).sum { |w| windows_by_workspace[w.num].size }
+    end
+
+    def current_slot
+      focused = outputs.find(&:focused)
+      out = focused && !ambient?(focused) ? focused : work_outputs.first
+      out.current_num % GROUP_SIZE
+    end
+
+    def free_slot
+      config["slots"].find { |s| !contexts.key?(s) && work_workspaces(s).empty? } ||
+        raise(Error, "no free slot: all #{config["slots"].size} slots are in use")
+    end
+
+    # ----- state file --------------------------------------------------------
+
+    def load_state
+      return {} unless File.exist?(STATE_PATH)
+      JSON.parse(File.read(STATE_PATH)).to_h { |k, v| [Integer(k), v] }
+    rescue JSON::ParserError, ArgumentError
+      {}
+    end
+
+    def save_state
+      FileUtils.mkdir_p(File.dirname(STATE_PATH))
+      File.write(STATE_PATH, JSON.pretty_generate(contexts.sort.to_h) + "\n")
+    end
+
+    # ----- sway actions -----------------------------------------------------
+
+    def label(num, name) = name ? "#{num}:#{name}" : num.to_s
+
+    # Rename the existing workspaces of a slot (does not create or focus anything).
+    def apply_names(slot, name)
+      work_workspaces(slot).each do |w|
+        target = label(w.num, name)
+        next if w.name == target
+        sway.run(%(rename workspace "#{w.name}" to "#{target}"))
+        w.name = target
+      end
+    end
+
+    # Show slot on every work output, creating and naming workspaces as needed.
+    def focus_slot(slot, name)
+      before = outputs.find(&:focused)
+      work_outputs.each do |out|
+        num = out.group * GROUP_SIZE + slot
+        existing = workspaces.find { |w| w.num == num }
+        if existing && existing.output != out.name
+          # Stray workspace on the wrong output (e.g. after re-plugging monitors).
+          sway.run("workspace number #{num}")
+          sway.run("move workspace to output #{out.name}")
+        end
+        sway.run("focus output #{out.name}")
+        sway.run("workspace number #{num}")
+      end
+      refresh!
+      apply_names(slot, name)
+      # Land where the user was, unless that was the ambient output.
+      back_to = before && !ambient?(before) ? before : work_outputs.first
+      sway.run("focus output #{back_to.name}")
+    end
+
+    def kill_windows(slot)
+      work_workspaces(slot).each do |w|
+        sway.run(%([workspace="^#{Regexp.escape(w.name)}$"] kill))
+      end
+    end
+
+    def refresh!
+      @workspaces = @outputs = @windows = nil
+    end
+
+    # ----- menu --------------------------------------------------------------
+
+    def menu(lines, prompt:, filter: nil)
+      cmd = config["menu"] + ["-p", prompt]
+      cmd += ["-filter", filter] if filter
+      out, status = Open3.capture2(*cmd, stdin_data: lines.join("\n"))
+      choice = out.strip
+      return nil if !status.success? && choice.empty?
+      choice.empty? ? nil : choice
+    end
+
+    def menu_line(slot, name)
+      count = window_count(slot)
+      format("%d  %-30s %s", slot, name, count == 1 ? "1 window" : "#{count} windows")
+    end
+
+    def validate_name!(name)
+      name = name.to_s.strip.tr('"', "'").gsub(/\s+/, " ")
+      raise Error, "context name must not be empty" if name.empty?
+      raise Error, "context name must not start with a digit or colon" if name.match?(/\A[\d:]/)
+      name
+    end
+
+    # ----- commands ----------------------------------------------------------
+
+    def cmd_list
+      slots = (contexts.keys | workspaces.select { |w| work_groups.include?(w.group) }.map(&:slot)).sort
+      cur = current_slot
+      slots.each do |slot|
+        marker = slot == cur ? "*" : " "
+        name = contexts[slot] || "(unnamed)"
+        puts format("%s %d  %-30s %2d windows  [%s]", marker, slot, name, window_count(slot),
+                    work_workspaces(slot).map(&:name).join(", "))
+      end
+      save_state
+    end
+
+    def cmd_current
+      puts contexts[current_slot].to_s
+    end
+
+    def cmd_switch(name = nil)
+      if name.nil?
+        lines = contexts.sort.map { |slot, n| menu_line(slot, n) }
+        choice = menu(lines, prompt: "context")
+        return if choice.nil?
+        idx = lines.index(choice)
+        if idx
+          slot = contexts.sort[idx].first
+        elsif (slot = context_by_name(choice.strip))
+          # typed an exact existing name
+        else
+          return cmd_new(choice)
+        end
+      else
+        slot = context_by_name(name) or raise Error, "no context named #{name.inspect}"
+      end
+      focus_slot(slot, contexts[slot])
+      save_state
+    end
+
+    def cmd_new(name = nil)
+      name ||= menu([], prompt: "new context") or return
+      name = validate_name!(name)
+      if (slot = context_by_name(name))
+        warn "context #{name.inspect} already exists in slot #{slot}, switching to it"
+      else
+        slot = free_slot
+        contexts[slot] = name
+      end
+      focus_slot(slot, name)
+      save_state
+      puts "#{slot}  #{name}"
+    end
+
+    def cmd_rename(name = nil)
+      slot = current_slot
+      name ||= menu([], prompt: "rename context", filter: contexts[slot]) or return
+      name = validate_name!(name)
+      other = context_by_name(name)
+      raise Error, "context #{name.inspect} already exists in slot #{other}" if other && other != slot
+      contexts[slot] = name
+      apply_names(slot, name)
+      save_state
+      puts "#{slot}  #{name}"
+    end
+
+    # Turn the focused workspace into a context. If the rest of its slot is
+    # empty and unnamed, name the slot in place. Otherwise move the focused
+    # workspace's windows to a fresh slot, so unrelated windows on the other
+    # work output are left alone.
+    def cmd_adopt(name = nil)
+      ws = workspaces.find(&:focused) or raise Error, "no focused workspace"
+      raise Error, "workspace #{ws.name} is on an ambient output" unless work_groups.include?(ws.group)
+      windows = windows_by_workspace[ws.num]
+      raise Error, "workspace #{ws.name} has no windows" if windows.empty?
+
+      name ||= menu([], prompt: "adopt #{ws.name} as context") or return
+      name = validate_name!(name)
+      raise Error, "context #{name.inspect} already exists in slot #{context_by_name(name)}" if context_by_name(name)
+
+      others = work_workspaces(ws.slot) - [ws]
+      if !contexts.key?(ws.slot) && others.all? { |w| windows_by_workspace[w.num].empty? }
+        slot = ws.slot
+        contexts[slot] = name
+        apply_names(slot, name)
+        puts "#{slot}  #{name}  (named in place)"
+      else
+        slot = free_slot
+        target = ws.group * GROUP_SIZE + slot
+        windows.each { |id| sway.run("[con_id=#{id}] move container to workspace number #{target}") }
+        contexts[slot] = name
+        refresh!
+        focus_slot(slot, name)
+        puts "#{slot}  #{name}  (moved #{windows.size} windows from #{ws.name})"
+      end
+      save_state
+    end
+
+    def cmd_close(*args)
+      kill = args.delete("--kill")
+      name = args.first
+      slot = name ? (context_by_name(name) or raise Error, "no context named #{name.inspect}") : current_slot
+      raise Error, "slot #{slot} has no context" unless contexts.key?(slot)
+      if kill
+        kill_windows(slot)
+        sleep 0.2 # give clients a moment to go away before we rename
+        refresh!
+      elsif window_count(slot) > 0
+        warn "note: #{window_count(slot)} windows remain in slot #{slot} (use --kill to close them)"
+      end
+      contexts.delete(slot)
+      apply_names(slot, nil)
+      save_state
+    end
+
+    # Re-apply stored names to live workspaces, e.g. after a sway restart.
+    def cmd_sync
+      contexts.each { |slot, name| apply_names(slot, name) }
+      save_state
+    end
+  end
+
+  USAGE = <<~TXT
+    usage: sway-context <command> [args]
+
+      switch [name]     menu of contexts; pick one or type a new name to create it
+      new [name]        create a context in a free slot and switch to it
+      rename [name]     rename the current context (or name an unnamed slot)
+      adopt [name]      make the focused workspace a context (in place, or moved to a free slot)
+      close [name] [--kill]
+                        forget a context; with --kill also close its windows
+      list              show slots, names and window counts
+      current           print the current context name (for bars)
+      sync              re-apply stored names to workspaces (after sway restart)
+
+    config: #{CONFIG_PATH}
+    state:  #{STATE_PATH}
+  TXT
+
+  def self.main(argv)
+    cmd, *args = argv
+    m = Manager.new
+    case cmd
+    when "switch"  then m.cmd_switch(*args)
+    when "new"     then m.cmd_new(*args)
+    when "rename"  then m.cmd_rename(*args)
+    when "adopt"   then m.cmd_adopt(*args)
+    when "close"   then m.cmd_close(*args)
+    when "list"    then m.cmd_list
+    when "current" then m.cmd_current
+    when "sync"    then m.cmd_sync
+    when nil, "-h", "--help", "help" then puts USAGE
+    else
+      warn "unknown command #{cmd.inspect}\n\n#{USAGE}"
+      exit 2
+    end
+  rescue Error => e
+    warn "sway-context: #{e.message}"
+    exit 1
+  end
+end
+
+SwayContext.main(ARGV) if $PROGRAM_NAME == __FILE__
