@@ -29,7 +29,7 @@
             [
               "sh",
               "-c",
-              "cd ~/src/myproject && git fetch -q origin master && { wt switch -y -c {name} -b origin/master -x zed -- \"{{ worktree_path }}\" || wt switch -y {name} -x zed -- \"{{ worktree_path }}\"; }"
+              "cd ~/src/myproject && git fetch -q origin master && { wt switch -y -c me/{name} -b origin/master -x zed -- \"{{ worktree_path }}\" || wt switch -y me/{name} -x zed -- \"{{ worktree_path }}\"; }"
             ]
           ]
         },
@@ -52,7 +52,7 @@
             [
               "sh",
               "-c",
-              "cd ~/src/myproject && git fetch -q origin master && { wt switch -y -c {name} -b origin/master -x zed -- \"{{ worktree_path }}\" || wt switch -y {name} -x zed -- \"{{ worktree_path }}\"; }"
+              "cd ~/src/myproject && git fetch -q origin master && { wt switch -y -c me/{name} -b origin/master -x zed -- \"{{ worktree_path }}\" || wt switch -y me/{name} -x zed -- \"{{ worktree_path }}\"; }"
             ]
           ]
         },
