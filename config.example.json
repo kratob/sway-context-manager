@@ -27,8 +27,9 @@
         "1": {
           "launch": [
             [
-              "zed",
-              "~/src/myproject"
+              "sh",
+              "-c",
+              "cd ~/src/myproject && git fetch -q origin master && { wt switch -y -c {name} -b origin/master -x zed -- \"{{ worktree_path }}\" || wt switch -y {name} -x zed -- \"{{ worktree_path }}\"; }"
             ]
           ]
         },
@@ -49,8 +50,9 @@
         "1": {
           "launch": [
             [
-              "zed",
-              "~/src/myproject"
+              "sh",
+              "-c",
+              "cd ~/src/myproject && git fetch -q origin master && { wt switch -y -c {name} -b origin/master -x zed -- \"{{ worktree_path }}\" || wt switch -y {name} -x zed -- \"{{ worktree_path }}\"; }"
             ]
           ]
         },
