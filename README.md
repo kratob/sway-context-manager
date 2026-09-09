@@ -9,6 +9,7 @@ name shows up in waybar and `swaysome focus N` keeps working unchanged.
 
     sway-context switch [name]   menu of contexts; pick one, or type a new name to create it
     sway-context new [name]      create a context in a free slot and switch to it
+    sway-context next / prev     cycle through contexts in slot order
     sway-context name [name]     name the current slot as a new context (switches all work outputs to it,
                                  claiming whatever is on those workspaces), or rename an existing one.
                                  Aliases: rename, adopt
@@ -29,7 +30,7 @@ Without an argument, `switch`, `new` and `name` prompt via rofi.
     swaymsg reload
 
 Keys (see `sway/context.conf`): `$mod+x` switch or create, `$mod+Shift+x` close current (windows stay),
-`$mod+Control+x` name or rename the current slot.
+`$mod+Control+x` name or rename the current slot, `$mod+Tab` / `$mod+Shift+Tab` next / previous context.
 
 ## Outputs
 

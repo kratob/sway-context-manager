@@ -470,6 +470,23 @@ module SwayContext
       save_state
     end
 
+    # Cycle through contexts in slot order; direction is +1 or -1.
+    def cmd_cycle(direction)
+      from = current_slot
+      prune_empty(keep: [from])
+      slots = contexts.keys.sort
+      others = slots - [from]
+      return warn("sway-context: no other context to switch to") if others.empty?
+      # Slots ahead of (or behind) the current one, wrapping around.
+      ahead = direction > 0 ? others.select { |s| s > from } + others.select { |s| s < from }
+                            : others.select { |s| s < from }.reverse + others.select { |s| s > from }.reverse
+      slot = ahead.first
+      focus_slot(slot, contexts[slot])
+      prune_empty(keep: [slot])
+      save_state
+      puts "#{slot}  #{contexts[slot]}"
+    end
+
     def cmd_new(name = nil)
       prune_empty(keep: [current_slot]) # frees slots held by stale contexts
       name ||= menu([], prompt: "new context") or return
@@ -539,6 +556,7 @@ module SwayContext
 
       switch [name]     menu of contexts; pick one or type a new name to create it
       new [name]        create a context in a free slot and switch to it
+      next / prev       cycle through contexts in slot order
       name [name]       name the current slot as a new context (switching all work outputs to it),
                         or rename an existing one (aliases: rename, adopt)
       close [name] [--kill]
@@ -563,6 +581,8 @@ module SwayContext
     when "close"   then m.cmd_close(*args)
     when "list"    then m.cmd_list
     when "template" then m.cmd_template(*args)
+    when "next"    then m.cmd_cycle(1)
+    when "prev"    then m.cmd_cycle(-1)
     when "current" then m.cmd_current
     when "sync"    then m.cmd_sync
     when nil, "-h", "--help", "help" then puts USAGE
