@@ -67,5 +67,8 @@
         }
       }
     }
+  ],
+  "launch_env_files": [
+    "$XDG_RUNTIME_DIR/ssh-agent.env"
   ]
 }

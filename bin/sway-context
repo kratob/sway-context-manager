@@ -16,6 +16,14 @@ require "fileutils"
 module SwayContext
   CONFIG_PATH = File.expand_path(ENV.fetch("SWAY_CONTEXT_CONFIG", "~/.config/sway-context/config.json"))
   STATE_PATH  = File.expand_path(ENV.fetch("SWAY_CONTEXT_STATE", "~/.local/state/sway-context/contexts.json"))
+  LOG_PATH    = File.expand_path(ENV.fetch("SWAY_CONTEXT_LOG", "~/.local/state/sway-context/launch.log"))
+
+  # Append a line to the log file; with warn: true also print it to stderr.
+  def self.log(message, warn: false)
+    FileUtils.mkdir_p(File.dirname(LOG_PATH))
+    File.open(LOG_PATH, "a") { |f| f.puts "#{Time.now.strftime('%F %T')} #{message}" }
+    Kernel.warn "sway-context: #{message}" if warn
+  end
   GROUP_SIZE  = 10 # swaysome: workspace number = output_group * 10 + slot
 
   DEFAULT_CONFIG = {
@@ -35,6 +43,12 @@ module SwayContext
     # Seconds to wait for a launched application's window before giving up
     # on placing it.
     "launch_timeout" => 15,
+    # Shell files to source before running template commands. Sway's exec
+    # environment lacks variables your shell sets up (e.g. SSH_AUTH_SOCK), so
+    # list the files that provide them. $VARS and ~ are expanded; missing
+    # files are skipped.
+    #   ["$XDG_RUNTIME_DIR/ssh-agent.env"]
+    "launch_env_files" => [],
     # Command used for menus and prompts. Must read choices on stdin and
     # print the chosen (or typed) line on stdout, like rofi -dmenu.
     "menu" => ["rofi", "-dmenu", "-i"],
@@ -86,22 +100,28 @@ module SwayContext
   # and moving the window explicitly makes placement independent of which
   # workspace happens to be focused when the app finally maps its window.
   class Launcher
-    def initialize(sway, timeout:)
+    # env: extra environment for launched programs. Their stdout/stderr go to
+    # the log file so failures are visible even when started from a keybinding.
+    def initialize(sway, timeout:, env: {})
       @sway = sway
       @timeout = timeout
+      @env = env
       @events, @thread = nil
     end
 
     def launch(argv, target_num)
       subscribe
       drain
-      pid = Process.spawn(*argv, in: File::NULL, out: File::NULL, err: File::NULL, pgroup: true)
+      SwayContext.log("launch (-> workspace #{target_num}): #{argv.join(' ')}")
+      log = File.open(LOG_PATH, "a")
+      pid = Process.spawn(@env, *argv, in: File::NULL, out: log, err: log, pgroup: true)
+      log.close
       Process.detach(pid)
       if (event = wait_for_new_window)
         id = event["container"]["id"]
         @sway.run("[con_id=#{id}] move container to workspace number #{target_num}")
       else
-        warn "sway-context: no window appeared within #{@timeout}s for #{argv.join(' ')}; leaving it where it opens"
+        SwayContext.log("no window appeared within #{@timeout}s for #{argv.join(' ')}; leaving it where it opens", warn: true)
       end
     end
 
@@ -318,13 +338,41 @@ module SwayContext
       arg.start_with?("~/") || arg == "~" ? File.expand_path(arg) : arg
     end
 
+    # Environment variables gained by sourcing config["launch_env_files"] in sh.
+    def launch_env
+      @launch_env ||= config["launch_env_files"].each_with_object({}) do |file, env|
+        path = File.expand_path(file.gsub(/\$(\w+)/) { ENV[$1].to_s })
+        next SwayContext.log("env file #{path} not found, skipping", warn: true) unless File.exist?(path)
+        out, status = Open3.capture2("sh", "-c", '. "$1" >/dev/null 2>&1; env -0', "sh", path)
+        next SwayContext.log("sourcing #{path} failed", warn: true) unless status.success?
+        out.split("\0").each do |kv|
+          k, v = kv.split("=", 2)
+          env[k] = v if v && ENV[k] != v && !%w[PWD OLDPWD SHLVL _].include?(k)
+        end
+      end
+    end
+
+    # Print what a template would run for the given name, without doing it.
+    def cmd_template(name)
+      tpl, match = template_for(name)
+      return puts("no template matches #{name.inspect}") unless tpl
+      puts "match: #{tpl["match"]}"
+      tpl.fetch("outputs", {}).each do |index, opts|
+        out = output_at(Integer(index))
+        puts "output #{index} (#{out ? out.name : 'not connected'}#{out && ambient?(out) ? ', ambient' : ''}):"
+        puts "  layout #{opts["layout"]}" if opts["layout"]
+        opts.fetch("launch", []).each { |argv| puts "  #{argv.map { |a| expand_arg(a, name, match) }.join(' ')}" }
+      end
+      puts "env from #{config["launch_env_files"].inspect}: #{launch_env.keys.join(', ')}" unless launch_env.empty?
+    end
+
     # Apply the matching template (if any) to a freshly created context. Assumes
     # focus_slot has just shown the slot on every work output.
     def run_template(slot, name)
       tpl, match = template_for(name)
       return unless tpl
       focused = outputs.find(&:focused)
-      launcher = Launcher.new(sway, timeout: config["launch_timeout"])
+      launcher = Launcher.new(sway, timeout: config["launch_timeout"], env: launch_env)
       tpl.fetch("outputs", {}).each do |index, opts|
         out = output_at(Integer(index))
         if out.nil? || ambient?(out)
@@ -496,11 +544,13 @@ module SwayContext
       close [name] [--kill]
                         forget a context; with --kill also close its windows
       list              show slots, names and window counts
+      template <name>   show what the matching template would launch (dry run)
       current           print the current context name (for bars)
       sync              re-apply stored names to workspaces (after sway restart)
 
     config: #{CONFIG_PATH}
     state:  #{STATE_PATH}
+    log:    #{LOG_PATH}
   TXT
 
   def self.main(argv)
@@ -512,6 +562,7 @@ module SwayContext
     when "name", "rename", "adopt" then m.cmd_name(*args)
     when "close"   then m.cmd_close(*args)
     when "list"    then m.cmd_list
+    when "template" then m.cmd_template(*args)
     when "current" then m.cmd_current
     when "sync"    then m.cmd_sync
     when nil, "-h", "--help", "help" then puts USAGE

@@ -17,6 +17,7 @@ name shows up in waybar and `swaysome focus N` keeps working unchanged.
     sway-context list            show slots, names, window counts
     sway-context current         print the current context name (for bars)
     sway-context sync            re-apply stored names after a sway restart
+    sway-context template <name> show what the matching template would launch (dry run)
 
 Without an argument, `switch`, `new` and `name` prompt via rofi.
 
@@ -59,6 +60,11 @@ into the switcher, or `name` on an unnamed slot). Not on `switch` or rename.
 - Apps are launched one at a time; the next new window sway reports is moved to the
   target workspace, so placement does not depend on focus or startup time
   (`launch_timeout` seconds per app).
+- Programs started from a keybinding run in sway's environment, which lacks variables your
+  shell sets up (typically `SSH_AUTH_SOCK`). `launch_env_files` lists shell files to source
+  before launching, e.g. `["$XDG_RUNTIME_DIR/ssh-agent.env"]`.
+- Output of launched programs and launcher warnings go to `~/.local/state/sway-context/launch.log`.
+  `sway-context template <name>` shows what would run, including the environment picked up.
 
 ## Files
 
