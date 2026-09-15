@@ -135,6 +135,12 @@ first, e.g. `["$XDG_RUNTIME_DIR/ssh-agent.env"]`. Output of launched programs an
 warnings go to `~/.local/state/sway-context/launch.log`. `sway-context show <name>` prints
 how a name resolves without running anything.
 
+Failures are also shown as desktop notifications, since from a keybinding nobody sees stderr:
+an action exiting non-zero (with the last lines of its output), a program that opens no
+window within `launch_timeout`, and errors like an unknown action. `notify` is the command
+used, run with a summary and a body argument; the default is
+`["notify-send", "-u", "critical", "-a", "sway-context"]`, `[]` turns notifications off.
+
 ## Files
 
 - config: `~/.config/sway-context/config.json` (`SWAY_CONTEXT_CONFIG` overrides)

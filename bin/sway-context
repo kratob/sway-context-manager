@@ -29,6 +29,25 @@ module SwayContext
     File.open(LOG_PATH, "a") { |f| f.puts "#{Time.now.strftime('%F %T')} #{message}" }
     Kernel.warn "sway-context: #{message}" if warn
   end
+
+  # Desktop notification via config["notify"] (a no-op when it is empty).
+  # Failures are logged and warned first, so the notification is a courtesy
+  # for when nobody is watching a terminal, e.g. from a keybinding.
+  def self.notify(config, summary, body = nil)
+    log("#{summary}#{body ? ": #{body.lines.first&.strip}" : ''}", warn: true)
+    argv = config["notify"]
+    return if argv.nil? || argv.empty?
+    Process.detach(Process.spawn(*argv, summary, body.to_s, in: File::NULL, out: File::NULL, err: File::NULL))
+  rescue SystemCallError => e
+    log("notify failed: #{e.message}")
+  end
+
+  # Last `count` lines the log gained since `offset` (for error details).
+  def self.log_tail(offset, count = 5)
+    File.open(LOG_PATH) { |f| f.seek(offset); f.read }.lines.last(count).join.strip
+  rescue SystemCallError
+    ""
+  end
   GROUP_SIZE  = 10 # swaysome: workspace number = output_group * 10 + slot
 
   DEFAULT_CONFIG = {
@@ -76,6 +95,9 @@ module SwayContext
     # skipped.
     #   ["$XDG_RUNTIME_DIR/ssh-agent.env"]
     "launch_env_files" => [],
+    # Command run with a summary and a body argument when an action fails or
+    # a launched program opens no window. [] disables notifications.
+    "notify" => ["notify-send", "-u", "critical", "-a", "sway-context"],
     # Command used for menus and prompts. Must read choices on stdin and
     # print the chosen (or typed) line on stdout, like rofi -dmenu.
     "menu" => ["rofi", "-dmenu", "-i"],
@@ -127,29 +149,34 @@ module SwayContext
   # and moving the window explicitly makes placement independent of which
   # workspace happens to be focused when the app finally maps its window.
   class Launcher
-    def initialize(sway, timeout:)
+    def initialize(sway, timeout:, config: {})
       @sway = sway
       @timeout = timeout
+      @config = config
       @events, @thread = nil
     end
 
     # Programs' stdout/stderr go to the log file so failures are visible even
     # when started from a keybinding.
-    def launch(argv, target_num, env: {}, chdir: nil)
+    def launch(argv, target_num, env: {}, chdir: nil, what: argv.first)
       subscribe
       drain
       SwayContext.log("launch (-> workspace #{target_num}#{chdir ? ", in #{chdir}" : ''}): #{argv.join(' ')}")
       opts = { in: File::NULL, pgroup: true }
       opts[:chdir] = chdir if chdir
       log = File.open(LOG_PATH, "a")
+      offset = log.size
       pid = Process.spawn(env, *argv, out: log, err: log, **opts)
       log.close
-      Process.detach(pid)
-      if (event = wait_for_new_window)
+      event, status = wait_for_new_window(pid)
+      Process.detach(pid) unless status
+      if event
         id = event["container"]["id"]
         @sway.run("[con_id=#{id}] move container to workspace number #{target_num}")
+      elsif status && !status.success?
+        SwayContext.notify(@config, "#{what} failed (status #{status.exitstatus})", SwayContext.log_tail(offset))
       else
-        SwayContext.log("no window appeared within #{@timeout}s for #{argv.join(' ')}; leaving it where it opens", warn: true)
+        SwayContext.notify(@config, "no window from #{what} within #{@timeout}s", "leaving it where it opens")
       end
     end
 
@@ -175,15 +202,33 @@ module SwayContext
       nil
     end
 
-    def wait_for_new_window
+    # Waits for a "new" window event. Returns [event, exit_status]: the event
+    # is nil on timeout; the status is set if the program already exited. A
+    # failed program ends the wait early; a successful exit does not, since
+    # the program may have handed the window to another process (chrome).
+    def wait_for_new_window(pid)
       deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @timeout
+      status = nil
       loop do
         remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        return nil if remaining <= 0 || !IO.select([@events], nil, nil, remaining)
-        line = @events.gets or return nil
+        return [nil, status] if remaining <= 0
+        unless IO.select([@events], nil, nil, [remaining, 0.5].min)
+          status ||= exit_status(pid)
+          return [nil, status] if status && !status.success?
+          next
+        end
+        line = @events.gets or return [nil, status]
         event = JSON.parse(line) rescue next
-        return event if event["change"] == "new"
+        return [event, status] if event["change"] == "new"
       end
+    end
+
+    # The exit status if the process has already ended, else nil.
+    def exit_status(pid)
+      _, st = Process.wait2(pid, Process::WNOHANG)
+      st
+    rescue Errno::ECHILD
+      nil
     end
   end
 
@@ -543,7 +588,7 @@ module SwayContext
         sway.run("layout #{layout}")
         sway.run("focus output #{focused.name}") if focused
       end
-      launcher.launch(argv, num, env: env, chdir: scope.dir)
+      launcher.launch(argv, num, env: env, chdir: scope.dir, what: "action #{key}")
     end
 
     # The output an action opens on: its "output" index if connected and not
@@ -562,10 +607,11 @@ module SwayContext
       opts = { in: File::NULL }
       opts[:chdir] = chdir if chdir
       log = File.open(LOG_PATH, "a")
+      offset = log.size
       pid = Process.spawn(env, *argv, out: log, err: log, **opts)
       log.close
       _, status = Process.wait2(pid)
-      SwayContext.log("#{what} failed with status #{status.exitstatus} (see #{LOG_PATH})", warn: true) unless status.success?
+      SwayContext.notify(config, "#{what} failed (status #{status.exitstatus})", SwayContext.log_tail(offset)) unless status.success?
       status.success?
     end
 
@@ -596,7 +642,7 @@ module SwayContext
       elsif scope.project["setup"]
         run_hook(scope, "setup")
       end
-      launcher = Launcher.new(sway, timeout: config["launch_timeout"])
+      launcher = Launcher.new(sway, timeout: config["launch_timeout"], config: config)
       scope.project.fetch("on_create", []).each { |key| run_action(scope, key, launcher: launcher) }
     ensure
       launcher&.close
@@ -790,7 +836,7 @@ module SwayContext
         choice = menu(lines, prompt: scope.name || "run") or return
         key = lines.index(choice) ? keys[lines.index(choice)] : choice.strip
       end
-      launcher = Launcher.new(sway, timeout: config["launch_timeout"])
+      launcher = Launcher.new(sway, timeout: config["launch_timeout"], config: config)
       run_action(scope, key, launcher: launcher)
     ensure
       launcher&.close
@@ -888,7 +934,11 @@ module SwayContext
       exit 2
     end
   rescue Error => e
-    warn "sway-context: #{e.message}"
+    if $stderr.tty?
+      warn "sway-context: #{e.message}"
+    else
+      notify(m ? m.config : DEFAULT_CONFIG, "sway-context #{cmd}", e.message)
+    end
     exit 1
   end
 end
