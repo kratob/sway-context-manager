@@ -45,6 +45,8 @@ module SwayContext
     #                 synchronously instead of waiting for a window to place
     #   "env"         extra environment for this action
     #   "description" shown in the run menu
+    #   "hidden"      true to leave it out of the run menu (still runnable by
+    #                 name and usable as a setup/teardown hook)
     # Placeholders: {name} context name, {slot} slot number, {rest} name after
     # the project match, {1}..{9} capture groups, {dir} project directory, and
     # every key of the project's "vars". Unknown {…} are left untouched; a
@@ -780,9 +782,10 @@ module SwayContext
     # Run an action in the current context; without a key, offer a menu.
     def cmd_run(key = nil)
       scope = current_scope
-      keys = scope.actions.keys.sort
-      raise Error, "no actions configured" if keys.empty?
+      raise Error, "no actions configured" if scope.actions.empty?
       if key.nil?
+        keys = scope.actions.reject { |_, a| a["hidden"] }.keys.sort
+        raise Error, "all actions are hidden; pass one by name" if keys.empty?
         lines = keys.map { |k| format("%-14s %s", k, scope.actions[k]["description"].to_s).rstrip }
         choice = menu(lines, prompt: scope.name || "run") or return
         key = lines.index(choice) ? keys[lines.index(choice)] : choice.strip
@@ -828,6 +831,7 @@ module SwayContext
       scope.actions.sort.each do |key, action|
         argv = action["launch"].map { |a| scope.expand(a.to_s) }
         where = action["window"] == false ? "no window" : "output #{action["output"] || 'focused'}"
+        where += ", hidden" if action["hidden"]
         puts format("  %-14s %s  [%s]", key, argv.join(" "), where)
       end
       puts "env files #{config["launch_env_files"].inspect}: #{launch_env.keys.join(', ')}" unless launch_env.empty?

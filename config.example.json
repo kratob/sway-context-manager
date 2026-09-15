@@ -54,7 +54,8 @@
         "sh",
         "-c",
         "cd {repo} && B={branch} && if git show-ref --verify -q \"refs/heads/$B\"; then wt switch -y \"$B\"; else wt switch -y -c \"$B\" -b origin/master; fi"
-      ]
+      ],
+      "hidden": true
     },
     "mr": {
       "description": "merge request for the branch, or the project if there is none",
@@ -74,7 +75,8 @@
         "sh",
         "-c",
         "cd {repo} && wt remove -y --foreground {branch}"
-      ]
+      ],
+      "hidden": true
     },
     "kill": {
       "description": "close all windows of this context and forget it",

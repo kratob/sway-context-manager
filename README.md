@@ -94,7 +94,9 @@ runs automatically via `on_create`.
   They run synchronously and only log; everything else is launched one at a time, and the
   next new window sway reports is moved to the target workspace (`launch_timeout` seconds
   per app), so placement does not depend on focus or startup time.
-- `env` adds variables for this action only. `description` is shown in the `run` menu.
+- `env` adds variables for this action only. `description` is shown in the `run` menu;
+  `hidden: true` leaves the action out of the menu (it can still be run by name and used as
+  a `setup`/`teardown` hook).
 - Actions are global. A project may add or override them in its own `actions` block.
 - Actions may call `sway-context` itself, which puts commands into the `run` menu:
   `"kill": { "launch": ["~/bin/sway-context", "kill", "{name}"], "window": false }`.
