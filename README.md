@@ -53,6 +53,7 @@ runs automatically via `on_create`.
       "terminal": { "launch": ["kitty"], "description": "terminal in the project directory" },
       "editor":   { "launch": ["zed", "{dir}"], "output": 1 },
       "tracker":  { "launch": ["google-chrome", "--new-window", "{issue_url}"], "output": -1 },
+      "mr":       { "launch": ["sh", "-c", "URL=$(glab mr view \"$1\" -F json | jq -r .web_url); [ -n \"$URL\" ] || URL=$(glab repo view -F json | jq -r .web_url); exec google-chrome --new-window \"$URL\"", "sh", "{branch}"], "output": -1 },
       "worktree": { "launch": ["sh", "-c", "cd {repo} && wt switch -y -c {branch} -b origin/master"],
                     "window": false }
     },

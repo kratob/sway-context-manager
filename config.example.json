@@ -55,6 +55,17 @@
         "-c",
         "cd {repo} && B={branch} && if git show-ref --verify -q \"refs/heads/$B\"; then wt switch -y \"$B\"; else wt switch -y -c \"$B\" -b origin/master; fi"
       ]
+    },
+    "mr": {
+      "description": "merge request for the branch, or the project if there is none",
+      "output": -1,
+      "launch": [
+        "sh",
+        "-c",
+        "URL=$(glab mr view \"$1\" -F json 2>/dev/null | jq -r .web_url); [ -n \"$URL\" ] || URL=$(glab repo view -F json 2>/dev/null | jq -r .web_url); exec google-chrome --new-window \"$URL\"",
+        "sh",
+        "{branch}"
+      ]
     }
   },
   "projects": [
