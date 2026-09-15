@@ -66,6 +66,15 @@
         "sh",
         "{branch}"
       ]
+    },
+    "worktree-remove": {
+      "description": "remove the worktree (fails if it has uncommitted changes)",
+      "window": false,
+      "launch": [
+        "sh",
+        "-c",
+        "cd {repo} && wt remove -y --foreground {branch}"
+      ]
     }
   },
   "projects": [
@@ -98,7 +107,8 @@
       "on_create": [
         "editor",
         "tracker"
-      ]
+      ],
+      "teardown": "worktree-remove"
     }
   ]
 }

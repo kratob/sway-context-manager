@@ -15,6 +15,8 @@ name shows up in waybar and `swaysome focus N` keeps working unchanged.
                                  Aliases: rename, adopt
     sway-context close [name] [--kill]
                                  forget a context; with --kill also close its windows
+    sway-context kill [name]     close all windows of a context and forget it (= close --kill)
+    sway-context teardown [name] run the project's teardown hook (e.g. remove the worktree), then kill
     sway-context list            show slots, names, window counts
     sway-context current         print the current context name (for bars)
     sway-context sync            re-apply stored names after a sway restart
@@ -107,6 +109,10 @@ runs automatically via `on_create`.
 - `dir` is either a path template or an argv whose stdout is the path. If the directory does
   not exist, `setup` (an action name or an argv) is run once and the lookup retried. This
   is how worktrees get created on demand without hardwiring any particular tool.
+- `teardown` is the inverse (an action name or an argv), run by `sway-context teardown` when
+  the directory exists. If it fails, nothing else happens: e.g. `wt remove` refuses a worktree
+  with uncommitted changes, so the context and its windows stay. `close` and automatic
+  pruning never run it.
 - `on_create` lists actions to run when a context is *created* (`new`, a new name typed into
   the switcher, or `name` on an unnamed slot). Not on `switch` or rename.
 

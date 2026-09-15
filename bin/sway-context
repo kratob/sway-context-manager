@@ -61,6 +61,7 @@ module SwayContext
     #               stdout is the path. If it cannot be resolved, "setup" is
     #               run once and the lookup retried.
     #   "setup"     action name or argv that creates the directory
+    #   "teardown"  action name or argv that removes it (`sway-context teardown`)
     #   "on_create" action names to run when a context is created
     #   "actions"   project-specific actions (override global ones)
     "projects" => [],
@@ -278,7 +279,7 @@ module SwayContext
       @dir = lookup_dir
       if @dir.nil? && project["setup"] && !@dry_run
         SwayContext.log("dir for #{name} not found, running setup")
-        manager.run_setup(self)
+        manager.run_hook(self, "setup")
         @dir = lookup_dir
       end
       SwayContext.log("could not resolve dir for #{name} (project #{project_label})", warn: !@dry_run) if @dir.nil?
@@ -566,16 +567,17 @@ module SwayContext
       status.success?
     end
 
-    # The project's "setup": an action name (run without a window) or an argv.
-    # {dir} is not available here, since setup is what creates it.
-    def run_setup(scope)
-      spec = scope.project["setup"]
+    # Run a project hook ("setup" or "teardown"): an action name (run without
+    # a window) or an argv. Runs outside the project dir and without {dir},
+    # since the hook is what creates or removes it. Returns success.
+    def run_hook(scope, hook)
+      spec = scope.project[hook]
       argv, extra_env, what =
         if spec.is_a?(Array)
-          [spec, {}, "setup"]
+          [spec, {}, hook]
         else
           action = action_for(scope, spec.to_s)
-          [action["launch"], action.fetch("env", {}), "setup (#{spec})"]
+          [action["launch"], action.fetch("env", {}), "#{hook} (#{spec})"]
         end
       argv = argv.map { |a| scope.expand(a.to_s, scope.vars) }
       env = scope.process_env(extra_env.transform_values { |v| scope.expand(v.to_s, scope.vars) })
@@ -590,7 +592,7 @@ module SwayContext
       if scope.project["dir"]
         scope.dir # runs setup when the directory is missing
       elsif scope.project["setup"]
-        run_setup(scope)
+        run_hook(scope, "setup")
       end
       launcher = Launcher.new(sway, timeout: config["launch_timeout"])
       scope.project.fetch("on_create", []).each { |key| run_action(scope, key, launcher: launcher) }
@@ -748,6 +750,27 @@ module SwayContext
       save_state
     end
 
+    # Close all windows of a context and forget it.
+    def cmd_kill(name = nil) = cmd_close(*[name, "--kill"].compact)
+
+    # Tear a context down: run the project's "teardown" hook (e.g. remove the
+    # worktree) if the project dir exists, then close all windows and forget
+    # the context. Nothing is touched if the hook fails.
+    def cmd_teardown(name = nil)
+      slot = name ? (context_by_name(name) or raise Error, "no context named #{name.inspect}") : current_slot
+      raise Error, "slot #{slot} has no context" unless contexts.key?(slot)
+      scope = scope_for(slot)
+      if scope.project && scope.project["teardown"]
+        if scope.lookup_dir
+          run_hook(scope, "teardown") or raise Error, "teardown of #{scope.name} failed, nothing closed (see #{LOG_PATH})"
+        else
+          SwayContext.log("teardown #{scope.name}: dir not found, skipping hook")
+        end
+      end
+      cmd_close(scope.name, "--kill")
+      puts "tore down #{scope.name}"
+    end
+
     # Re-apply stored names to live workspaces, e.g. after a sway restart.
     def cmd_sync
       contexts.each { |slot, name| apply_names(slot, name) }
@@ -821,6 +844,8 @@ module SwayContext
                         or rename an existing one (aliases: rename, adopt)
       close [name] [--kill]
                         forget a context; with --kill also close its windows
+      kill [name]       close all windows of a context and forget it (= close --kill)
+      teardown [name]   run the project's teardown hook (e.g. remove the worktree), then kill
       run [action]      run an action in the current context; without an action, show a menu
       env [--fish]      print the current context's environment for eval
       dir               print the current context's project directory
@@ -842,6 +867,8 @@ module SwayContext
     when "new"     then m.cmd_new(*args)
     when "name", "rename", "adopt" then m.cmd_name(*args)
     when "close"   then m.cmd_close(*args)
+    when "kill"    then m.cmd_kill(*args)
+    when "teardown" then m.cmd_teardown(*args)
     when "run"     then m.cmd_run(*args)
     when "env"     then m.cmd_env(*args)
     when "dir"     then m.cmd_dir
