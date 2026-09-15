@@ -20,55 +20,74 @@
     0
   ],
   "launch_timeout": 15,
-  "templates": [
+  "launch_env_files": [
+    "$XDG_RUNTIME_DIR/ssh-agent.env"
+  ],
+  "actions": {
+    "terminal": {
+      "description": "terminal in the project directory",
+      "launch": [
+        "kitty"
+      ]
+    },
+    "editor": {
+      "description": "editor on the project directory",
+      "launch": [
+        "zed",
+        "{dir}"
+      ],
+      "output": 1
+    },
+    "tracker": {
+      "description": "issue tracker in the browser",
+      "launch": [
+        "google-chrome",
+        "--new-window",
+        "{issue_url}"
+      ],
+      "output": -1
+    },
+    "worktree": {
+      "description": "create the worktree branch if needed",
+      "window": false,
+      "launch": [
+        "sh",
+        "-c",
+        "cd {repo} && B={branch} && if git show-ref --verify -q \"refs/heads/$B\"; then wt switch -y \"$B\"; else wt switch -y -c \"$B\" -b origin/master; fi"
+      ]
+    }
+  },
+  "projects": [
     {
+      "name": "proj-issue",
+      "extends": "proj",
       "match": "^proj-(\\d+)$",
-      "outputs": {
-        "1": {
-          "launch": [
-            [
-              "sh",
-              "-c",
-              "cd ~/src/myproject && B=me/{name} && if git show-ref --verify -q \"refs/heads/$B\"; then wt switch -y \"$B\" -x zed -- \"{{ worktree_path }}\"; else wt switch -y -c \"$B\" -b origin/master -x zed -- \"{{ worktree_path }}\"; fi"
-            ]
-          ]
-        },
-        "-1": {
-          "launch": [
-            [
-              "google-chrome",
-              "--new-window",
-              "https://tracker.example.com/issues/PROJ-{1}"
-            ]
-          ]
-        }
+      "vars": {
+        "issue_url": "https://tracker.example.com/issue/{1}"
       }
     },
     {
+      "name": "proj",
       "match": "^proj-",
-      "outputs": {
-        "1": {
-          "launch": [
-            [
-              "sh",
-              "-c",
-              "cd ~/src/myproject && B=me/{name} && if git show-ref --verify -q \"refs/heads/$B\"; then wt switch -y \"$B\" -x zed -- \"{{ worktree_path }}\"; else wt switch -y -c \"$B\" -b origin/master -x zed -- \"{{ worktree_path }}\"; fi"
-            ]
-          ]
-        },
-        "-1": {
-          "launch": [
-            [
-              "google-chrome",
-              "--new-window",
-              "https://tracker.example.com/projects/PROJ"
-            ]
-          ]
-        }
-      }
+      "vars": {
+        "repo": "~/src/myproject",
+        "branch": "me/{name}",
+        "issue_url": "https://tracker.example.com/board"
+      },
+      "env": {
+        "TEST_ENV_NUMBER": "{slot}",
+        "PORT": "300{slot}"
+      },
+      "dir": [
+        "sh",
+        "-c",
+        "git -C {repo} worktree list --porcelain | grep -B2 -x \"branch refs/heads/{branch}\" | sed -n 's/^worktree //p'"
+      ],
+      "setup": "worktree",
+      "on_create": [
+        "editor",
+        "tracker"
+      ]
     }
-  ],
-  "launch_env_files": [
-    "$XDG_RUNTIME_DIR/ssh-agent.env"
   ]
 }

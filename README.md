@@ -18,9 +18,12 @@ name shows up in waybar and `swaysome focus N` keeps working unchanged.
     sway-context list            show slots, names, window counts
     sway-context current         print the current context name (for bars)
     sway-context sync            re-apply stored names after a sway restart
-    sway-context template <name> show what the matching template would launch (dry run)
+    sway-context run [action]    run an action in the current context (see Projects); menu without an argument
+    sway-context env [--fish]    print the current context's environment, for eval in a shell
+    sway-context dir             print the current context's project directory
+    sway-context show [name]     show how a context resolves: project, vars, env, dir, actions (dry run)
 
-Without an argument, `switch`, `new` and `name` prompt via rofi.
+Without an argument, `switch`, `new`, `name` and `run` prompt via rofi.
 
 ## Install
 
@@ -30,7 +33,8 @@ Without an argument, `switch`, `new` and `name` prompt via rofi.
     swaymsg reload
 
 Keys (see `sway/context.conf`): `$mod+x` switch or create, `$mod+Shift+x` close current (windows stay),
-`$mod+Control+x` name or rename the current slot, `$mod+Tab` / `$mod+Shift+Tab` next / previous context.
+`$mod+Control+x` name or rename the current slot, `$mod+Tab` / `$mod+Shift+Tab` next / previous context,
+`$mod+p` menu of actions for the current context, `$mod+Shift+Return` terminal in the current context.
 
 ## Outputs
 
@@ -38,34 +42,87 @@ Outputs are addressed by position: all active outputs sorted left to right, inde
 being the leftmost and -1 the rightmost. `ambient_outputs` lists the indexes (or sway
 output names) that do not take part in contexts; every other output is a work output.
 
-## Templates
+## Projects and actions
 
-A template launches applications when a context is *created* (`new`, a new name typed
-into the switcher, or `name` on an unnamed slot). Not on `switch` or rename.
+A context can belong to a *project*, matched by regexp on the context name. The project
+supplies placeholder values, an environment, a working directory and a set of *actions*:
+named commands you run in the context with `sway-context run`, and that a new context
+runs automatically via `on_create`.
 
-    "templates": [
+    "actions": {
+      "terminal": { "launch": ["kitty"], "description": "terminal in the project directory" },
+      "editor":   { "launch": ["zed", "{dir}"], "output": 1 },
+      "tracker":  { "launch": ["google-chrome", "--new-window", "{issue_url}"], "output": -1 },
+      "worktree": { "launch": ["sh", "-c", "cd {repo} && wt switch -y -c {branch} -b origin/master"],
+                    "window": false }
+    },
+    "projects": [
       {
+        "name": "proj-issue", "extends": "proj",
+        "match": "^proj-(\d+)$",
+        "vars": { "issue_url": "https://tracker.example.com/issue/{1}" }
+      },
+      {
+        "name": "proj",
         "match": "^proj-",
-        "outputs": {
-          "1":  { "launch": [["zed", "~/src/myproject"]], "layout": "stacking" },
-          "-1": { "launch": [["google-chrome", "--new-window", "https://…/{name}"]] }
-        }
+        "vars": { "repo": "~/src/myproject", "branch": "me/{name}",
+                  "issue_url": "https://tracker.example.com/board" },
+        "env": { "TEST_ENV_NUMBER": "{slot}" },
+        "dir": ["sh", "-c", "git -C {repo} worktree list --porcelain | grep -B2 -x \"branch refs/heads/{branch}\" | sed -n 's/^worktree //p'"],
+        "setup": "worktree",
+        "on_create": ["editor", "tracker"]
       }
     ]
 
-- `match` is a regexp against the context name; the first matching template wins.
-- `outputs` keys are output position indexes (see above). Ambient or missing outputs are skipped.
-- `launch` is a list of argv arrays. `{name}` is the context name, `{rest}` the part after
-  the match (`proj-1234` → `1234`), `{1}`..`{9}` are regexp capture groups; a leading `~` is expanded.
-- `layout` runs `layout <mode>` on the (empty) workspace before launching.
-- Apps are launched one at a time; the next new window sway reports is moved to the
-  target workspace, so placement does not depend on focus or startup time
-  (`launch_timeout` seconds per app).
-- Programs started from a keybinding run in sway's environment, which lacks variables your
-  shell sets up (typically `SSH_AUTH_SOCK`). `launch_env_files` lists shell files to source
-  before launching, e.g. `["$XDG_RUNTIME_DIR/ssh-agent.env"]`.
-- Output of launched programs and launcher warnings go to `~/.local/state/sway-context/launch.log`.
-  `sway-context template <name>` shows what would run, including the environment picked up.
+### Actions
+
+- `launch` is the argv. Every argument may use placeholders: `{name}` (context name),
+  `{slot}` (slot number, a small integer unique among live contexts), `{rest}` (the name
+  after the project match), `{1}`..`{9}` (capture groups), `{dir}` (project directory) and
+  any key of the project's `vars`. Unknown `{…}` are left alone; a leading `~` is expanded.
+- Everything launched runs in `dir` (if the project has one) with the project's `env` plus
+  `SWAY_CONTEXT`, `SWAY_CONTEXT_SLOT` and `SWAY_CONTEXT_DIR`. So a terminal opened via an
+  action already sits in the right directory with the right variables, and an editor started
+  this way passes them on to its integrated terminals.
+- `output` is the position index the window opens on; without it, the focused output.
+  The window lands on the context's workspace of that output.
+- `layout` runs `layout <mode>` on that workspace first.
+- `window: false` marks commands that open no window (setup steps, clipboard helpers).
+  They run synchronously and only log; everything else is launched one at a time, and the
+  next new window sway reports is moved to the target workspace (`launch_timeout` seconds
+  per app), so placement does not depend on focus or startup time.
+- `env` adds variables for this action only. `description` is shown in the `run` menu.
+- Actions are global. A project may add or override them in its own `actions` block.
+
+### Projects
+
+- `match` is a regexp; the first matching project wins, so list specific projects before
+  general ones. `name` is for display and for `extends`.
+- `extends` refines another project: `vars`, `env` and `actions` are merged, everything else
+  is overridden. This keeps per-issue and per-project variants to a few lines.
+- `vars` are placeholder values and may themselves use placeholders (and earlier vars).
+- `env` is exported to everything launched in the context. `{slot}` is handy for anything
+  that must differ between contexts running at the same time (test databases, ports).
+- `dir` is either a path template or an argv whose stdout is the path. If the directory does
+  not exist, `setup` (an action name or an argv) is run once and the lookup retried. This
+  is how worktrees get created on demand without hardwiring any particular tool.
+- `on_create` lists actions to run when a context is *created* (`new`, a new name typed into
+  the switcher, or `name` on an unnamed slot). Not on `switch` or rename.
+
+### Shell integration
+
+`sway-context env` and `sway-context dir` let an existing terminal join the context:
+
+    ctx() { eval "$(sway-context env)"; cd "$(sway-context dir)"; }          # bash/zsh
+    function ctx; sway-context env --fish | source; cd (sway-context dir); end   # fish
+
+### Environment and logging
+
+Programs started from a keybinding run in sway's environment, which lacks variables your
+shell sets up (typically `SSH_AUTH_SOCK`). `launch_env_files` lists shell files to source
+first, e.g. `["$XDG_RUNTIME_DIR/ssh-agent.env"]`. Output of launched programs and launcher
+warnings go to `~/.local/state/sway-context/launch.log`. `sway-context show <name>` prints
+how a name resolves without running anything.
 
 ## Files
 

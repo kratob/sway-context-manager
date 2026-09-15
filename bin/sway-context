@@ -8,10 +8,15 @@
 # number <group>N is renamed to "<group>N:<name>", so the name shows up in
 # the bar and survives as long as the workspace has windows. A small state
 # file remembers names for slots whose workspaces are currently empty.
+#
+# A context may belong to a project (matched by regexp on its name). The
+# project provides variables, environment, a working directory and actions
+# (commands to launch in the context); see DEFAULT_CONFIG.
 
 require "json"
 require "open3"
 require "fileutils"
+require "shellwords"
 
 module SwayContext
   CONFIG_PATH = File.expand_path(ENV.fetch("SWAY_CONTEXT_CONFIG", "~/.config/sway-context/config.json"))
@@ -31,22 +36,41 @@ module SwayContext
     # position, left to right, starting at 0; -1 is the rightmost one.
     # Sway output names (strings) are accepted as well.
     "ambient_outputs" => [0],
-    # Templates applied when a context is created. The first whose regexp
-    # matches the context name wins. Output keys are position indexes as
-    # above. Arguments may use {name} (context name) and {rest} (name after
-    # the match), and a leading ~ is expanded.
-    #   { "match" => "^proj-",
-    #     "outputs" => {
-    #       "1" => { "launch" => [["zed", "~/src/myproject"]], "layout" => "stacking" },
-    #       "2" => { "launch" => [["google-chrome", "--new-window", "https://…/{rest}"]] } } }
-    "templates" => [],
+    # Actions: named commands that can be run in a context (`sway-context run`).
+    #   "launch"      argv; every argument may use placeholders (see below)
+    #   "output"      position index of the output to open the window on;
+    #                 default: the focused output
+    #   "layout"      sway layout to set on the target workspace first
+    #   "window"      false for commands that open no window: they are run
+    #                 synchronously instead of waiting for a window to place
+    #   "env"         extra environment for this action
+    #   "description" shown in the run menu
+    # Placeholders: {name} context name, {slot} slot number, {rest} name after
+    # the project match, {1}..{9} capture groups, {dir} project directory, and
+    # every key of the project's "vars". Unknown {…} are left untouched; a
+    # leading ~ is expanded.
+    #   "terminal" => { "launch" => ["kitty"] },
+    #   "editor"   => { "launch" => ["zed", "{dir}"], "output" => 1 }
+    "actions" => {},
+    # Projects: the first whose "match" regexp matches the context name wins.
+    #   "name"      for display and for "extends"
+    #   "extends"   name of another project whose settings this one refines
+    #   "vars"      placeholder values (may use built-in placeholders)
+    #   "env"       environment exported to everything launched in the context
+    #   "dir"       working directory: a path template, or an argv whose
+    #               stdout is the path. If it cannot be resolved, "setup" is
+    #               run once and the lookup retried.
+    #   "setup"     action name or argv that creates the directory
+    #   "on_create" action names to run when a context is created
+    #   "actions"   project-specific actions (override global ones)
+    "projects" => [],
     # Seconds to wait for a launched application's window before giving up
     # on placing it.
     "launch_timeout" => 15,
-    # Shell files to source before running template commands. Sway's exec
-    # environment lacks variables your shell sets up (e.g. SSH_AUTH_SOCK), so
-    # list the files that provide them. $VARS and ~ are expanded; missing
-    # files are skipped.
+    # Shell files to source before running commands. Sway's exec environment
+    # lacks variables your shell sets up (e.g. SSH_AUTH_SOCK), so list the
+    # files that provide them. $VARS and ~ are expanded; missing files are
+    # skipped.
     #   ["$XDG_RUNTIME_DIR/ssh-agent.env"]
     "launch_env_files" => [],
     # Command used for menus and prompts. Must read choices on stdin and
@@ -100,21 +124,22 @@ module SwayContext
   # and moving the window explicitly makes placement independent of which
   # workspace happens to be focused when the app finally maps its window.
   class Launcher
-    # env: extra environment for launched programs. Their stdout/stderr go to
-    # the log file so failures are visible even when started from a keybinding.
-    def initialize(sway, timeout:, env: {})
+    def initialize(sway, timeout:)
       @sway = sway
       @timeout = timeout
-      @env = env
       @events, @thread = nil
     end
 
-    def launch(argv, target_num)
+    # Programs' stdout/stderr go to the log file so failures are visible even
+    # when started from a keybinding.
+    def launch(argv, target_num, env: {}, chdir: nil)
       subscribe
       drain
-      SwayContext.log("launch (-> workspace #{target_num}): #{argv.join(' ')}")
+      SwayContext.log("launch (-> workspace #{target_num}#{chdir ? ", in #{chdir}" : ''}): #{argv.join(' ')}")
+      opts = { in: File::NULL, pgroup: true }
+      opts[:chdir] = chdir if chdir
       log = File.open(LOG_PATH, "a")
-      pid = Process.spawn(@env, *argv, in: File::NULL, out: log, err: log, pgroup: true)
+      pid = Process.spawn(env, *argv, out: log, err: log, **opts)
       log.close
       Process.detach(pid)
       if (event = wait_for_new_window)
@@ -170,12 +195,127 @@ module SwayContext
     end
   end
 
+  # A context (name + slot) seen through its project: placeholder values,
+  # environment, directory and available actions.
+  class Scope
+    PLACEHOLDER = /\{([A-Za-z_]\w*|\d)\}/
+
+    attr_reader :manager, :name, :slot, :project, :match
+
+    # dry_run: never run setup (for `show`).
+    def initialize(manager, name:, slot:, dry_run: false)
+      @manager = manager
+      @name = name
+      @slot = slot
+      @dry_run = dry_run
+      @project, @match = manager.project_for(name) if name
+    end
+
+    def project_label = project && (project["name"] || project["match"])
+
+    # {name}, {slot}, {rest}, {1}..{9}
+    def builtins
+      v = { "name" => name.to_s, "slot" => slot.to_s }
+      if match
+        v["rest"] = name[match.end(0)..]
+        match.captures.each_with_index { |c, i| v[(i + 1).to_s] = c.to_s }
+      end
+      v
+    end
+
+    # Built-ins plus the project's vars; a var may use earlier vars.
+    def vars
+      @vars ||= (project&.fetch("vars", nil) || {}).each_with_object(builtins) do |(k, v), table|
+        table[k] = expand(v.to_s, table)
+      end
+    end
+
+    # Replace known {placeholders}; unknown ones stay. Expands a leading ~.
+    def expand(str, table = vars_with_dir(str))
+      out = str.gsub(PLACEHOLDER) { |m| table.key?($1) ? table[$1] : m }
+      out.start_with?("~/") || out == "~" ? File.expand_path(out) : out
+    end
+
+    # Like expand, but fails if {dir} is needed and cannot be resolved.
+    def expand!(str)
+      out = expand(str)
+      raise Error, "#{str.inspect} needs {dir}, but #{dir_problem}" if out.include?("{dir}")
+      out
+    end
+
+    # Only look up the directory when a string actually asks for it.
+    def vars_with_dir(str)
+      str.include?("{dir}") && (d = dir) ? vars.merge("dir" => d) : vars
+    end
+
+    def dir_problem
+      return "the current slot has no context" unless name
+      return "no project matches #{name.inspect}" unless project
+      return "project #{project_label} defines no dir" unless project["dir"]
+      "the dir of project #{project_label} could not be resolved (see log)"
+    end
+
+    # Environment exported to everything launched in this context.
+    def env
+      e = { "SWAY_CONTEXT" => name.to_s, "SWAY_CONTEXT_SLOT" => slot.to_s }
+      (project&.fetch("env", nil) || {}).each { |k, v| e[k] = expand(v.to_s) }
+      e["SWAY_CONTEXT_DIR"] = dir if dir
+      e
+    end
+
+    # Full process environment: sourced env files, then context env, then extra.
+    def process_env(extra = {}) = manager.launch_env.merge(env).merge(extra)
+
+    def actions
+      @actions ||= manager.config.fetch("actions", {}).merge(project&.fetch("actions", nil) || {})
+    end
+
+    # Resolved project directory, running "setup" once if it is missing.
+    def dir
+      return @dir if defined?(@dir)
+      @dir = nil
+      return nil unless project && project["dir"]
+      @dir = lookup_dir
+      if @dir.nil? && project["setup"] && !@dry_run
+        SwayContext.log("dir for #{name} not found, running setup")
+        manager.run_setup(self)
+        @dir = lookup_dir
+      end
+      SwayContext.log("could not resolve dir for #{name} (project #{project_label})", warn: !@dry_run) if @dir.nil?
+      @dir
+    end
+
+    # Try the "dir" spec once, without side effects. nil if not found.
+    def lookup_dir
+      spec = project["dir"]
+      path =
+        if spec.is_a?(Array)
+          argv = spec.map { |a| expand(a, vars) }
+          out, err, status = Open3.capture3(process_env_without_dir, *argv)
+          SwayContext.log("dir command failed: #{argv.join(' ')}: #{err.strip}") unless status.success?
+          status.success? ? out.strip : ""
+        else
+          expand(spec, vars)
+        end
+      return nil if path.empty?
+      path = File.expand_path(path)
+      File.directory?(path) ? path : nil
+    end
+
+    private
+
+    def process_env_without_dir
+      manager.launch_env.merge("SWAY_CONTEXT" => name.to_s, "SWAY_CONTEXT_SLOT" => slot.to_s)
+    end
+  end
+
   class Manager
     attr_reader :config, :sway
 
     def initialize(sway: Sway.new, config: load_config)
       @sway = sway
       @config = config
+      warn "sway-context: config key \"templates\" is no longer supported; use \"projects\" and \"actions\" (see README)" if config.key?("templates")
     end
 
     # ----- model -------------------------------------------------------------
@@ -222,6 +362,12 @@ module SwayContext
 
     def work_workspaces(slot) = workspaces.select { |w| w.slot == slot && work_groups.include?(w.group) }
 
+    # The focused output if it is a work output, else the first work output.
+    def focused_work_output
+      focused = outputs.find(&:focused)
+      focused && !ambient?(focused) ? focused : work_outputs.first
+    end
+
     # slot => name. Live workspace names win over the state file.
     def contexts
       @contexts ||= begin
@@ -250,16 +396,16 @@ module SwayContext
       work_workspaces(slot).sum { |w| windows_by_workspace[w.num].size }
     end
 
-    def current_slot
-      focused = outputs.find(&:focused)
-      out = focused && !ambient?(focused) ? focused : work_outputs.first
-      out.current_num % GROUP_SIZE
-    end
+    def current_slot = focused_work_output.current_num % GROUP_SIZE
 
     def free_slot
       config["slots"].find { |s| !contexts.key?(s) && work_workspaces(s).empty? } ||
         raise(Error, "no free slot: all #{config["slots"].size} slots are in use")
     end
+
+    def scope_for(slot, name = contexts[slot]) = Scope.new(self, name: name, slot: slot)
+
+    def current_scope = scope_for(current_slot)
 
     # ----- state file --------------------------------------------------------
 
@@ -320,22 +466,36 @@ module SwayContext
       @workspaces = @outputs = @windows = nil
     end
 
-    # ----- templates ---------------------------------------------------------
+    # ----- projects and actions ----------------------------------------------
 
-    # [template, match_data] for the first template matching the name, or nil.
-    def template_for(name)
-      config["templates"].each do |tpl|
-        m = Regexp.new(tpl["match"]).match(name)
-        return [tpl, m] if m
+    # Projects with "extends" resolved: hashes (vars, env, actions) are merged,
+    # everything else is overridden by the extending project.
+    def projects
+      @projects ||= begin
+        raw = config.fetch("projects", [])
+        by_name = raw.to_h { |p| [p["name"], p] }
+        resolve = lambda do |p, seen = []|
+          base = p["extends"] or return p
+          raise Error, "project #{p["name"] || p["match"]}: extends unknown project #{base.inspect}" unless by_name[base]
+          raise Error, "project #{base}: circular extends" if seen.include?(base)
+          merged = resolve.call(by_name[base], seen + [base]).merge(p.reject { |k, _| k == "extends" })
+          %w[vars env actions].each do |k|
+            merged[k] = (by_name[base][k] || {}).merge(p[k] || {}) if by_name[base][k] || p[k]
+          end
+          merged
+        end
+        raw.map { |p| resolve.call(p) }
       end
-      nil
     end
 
-    # {name}: context name, {rest}: name after the match, {1}..{9}: capture groups.
-    def expand_arg(arg, name, match)
-      arg = arg.gsub("{name}", name).gsub("{rest}", name[match.end(0)..])
-      arg = arg.gsub(/\{(\d)\}/) { match[Integer($1)].to_s }
-      arg.start_with?("~/") || arg == "~" ? File.expand_path(arg) : arg
+    # [project, match_data] for the first project matching the name, or nil.
+    def project_for(name)
+      projects.each do |p|
+        next unless p["match"]
+        m = Regexp.new(p["match"]).match(name)
+        return [p, m] if m
+      end
+      nil
     end
 
     # Environment variables gained by sourcing config["launch_env_files"] in sh.
@@ -352,44 +512,88 @@ module SwayContext
       end
     end
 
-    # Print what a template would run for the given name, without doing it.
-    def cmd_template(name)
-      tpl, match = template_for(name)
-      return puts("no template matches #{name.inspect}") unless tpl
-      puts "match: #{tpl["match"]}"
-      tpl.fetch("outputs", {}).each do |index, opts|
-        out = output_at(Integer(index))
-        puts "output #{index} (#{out ? out.name : 'not connected'}#{out && ambient?(out) ? ', ambient' : ''}):"
-        puts "  layout #{opts["layout"]}" if opts["layout"]
-        opts.fetch("launch", []).each { |argv| puts "  #{argv.map { |a| expand_arg(a, name, match) }.join(' ')}" }
-      end
-      puts "env from #{config["launch_env_files"].inspect}: #{launch_env.keys.join(', ')}" unless launch_env.empty?
+    def action_for(scope, key)
+      action = scope.actions[key]
+      return action if action.is_a?(Hash) && action["launch"].is_a?(Array)
+      where = scope.project ? " (project #{scope.project_label})" : ""
+      raise Error, "no action #{key.inspect}#{where}; available: #{scope.actions.keys.sort.join(', ')}"
     end
 
-    # Apply the matching template (if any) to a freshly created context. Assumes
-    # focus_slot has just shown the slot on every work output.
-    def run_template(slot, name)
-      tpl, match = template_for(name)
-      return unless tpl
-      focused = outputs.find(&:focused)
-      launcher = Launcher.new(sway, timeout: config["launch_timeout"], env: launch_env)
-      tpl.fetch("outputs", {}).each do |index, opts|
-        out = output_at(Integer(index))
-        if out.nil? || ambient?(out)
-          warn "sway-context: template output #{index} is #{out ? 'ambient' : 'not connected'}, skipping"
-          next
-        end
-        num = out.group * GROUP_SIZE + slot
-        if (layout = opts["layout"])
-          sway.run("focus output #{out.name}")
-          sway.run("workspace number #{num}")
-          sway.run("layout #{layout}")
-        end
-        opts.fetch("launch", []).each do |argv|
-          launcher.launch(argv.map { |a| expand_arg(a, name, match) }, num)
-        end
+    def action_argv(scope, action) = action["launch"].map { |a| scope.expand!(a.to_s) }
+
+    def action_env(scope, action) = scope.process_env(action.fetch("env", {}).transform_values { |v| scope.expand!(v.to_s) })
+
+    # Run an action in the scope's context. Window-opening actions go through
+    # the launcher; "window": false actions run synchronously, logged.
+    def run_action(scope, key, launcher:)
+      action = action_for(scope, key)
+      argv = action_argv(scope, action)
+      env = action_env(scope, action)
+      return run_sync(argv, env, chdir: scope.dir, what: "action #{key}") if action["window"] == false
+
+      out = target_output(action["output"], key)
+      num = out.group * GROUP_SIZE + scope.slot
+      if (layout = action["layout"])
+        focused = outputs.find(&:focused)
+        sway.run("focus output #{out.name}")
+        sway.run("workspace number #{num}")
+        sway.run("layout #{layout}")
+        sway.run("focus output #{focused.name}") if focused
       end
-      sway.run("focus output #{focused.name}") if focused
+      launcher.launch(argv, num, env: env, chdir: scope.dir)
+    end
+
+    # The output an action opens on: its "output" index if connected and not
+    # ambient, else the focused work output.
+    def target_output(index, key)
+      return focused_work_output if index.nil?
+      out = output_at(Integer(index))
+      return out if out && !ambient?(out)
+      warn "sway-context: output #{index} for action #{key} is #{out ? 'ambient' : 'not connected'}, using the focused output"
+      focused_work_output
+    end
+
+    # Run argv to completion with stdout/stderr in the log; warn on failure.
+    def run_sync(argv, env, chdir: nil, what: argv.first)
+      SwayContext.log("run#{chdir ? " (in #{chdir})" : ''}: #{argv.join(' ')}")
+      opts = { in: File::NULL }
+      opts[:chdir] = chdir if chdir
+      log = File.open(LOG_PATH, "a")
+      pid = Process.spawn(env, *argv, out: log, err: log, **opts)
+      log.close
+      _, status = Process.wait2(pid)
+      SwayContext.log("#{what} failed with status #{status.exitstatus} (see #{LOG_PATH})", warn: true) unless status.success?
+      status.success?
+    end
+
+    # The project's "setup": an action name (run without a window) or an argv.
+    # {dir} is not available here, since setup is what creates it.
+    def run_setup(scope)
+      spec = scope.project["setup"]
+      argv, extra_env, what =
+        if spec.is_a?(Array)
+          [spec, {}, "setup"]
+        else
+          action = action_for(scope, spec.to_s)
+          [action["launch"], action.fetch("env", {}), "setup (#{spec})"]
+        end
+      argv = argv.map { |a| scope.expand(a.to_s, scope.vars) }
+      env = scope.process_env(extra_env.transform_values { |v| scope.expand(v.to_s, scope.vars) })
+      run_sync(argv, env, what: what)
+    end
+
+    # Bring a freshly created context to life: resolve its directory (which
+    # runs setup if needed) and run the project's on_create actions. Assumes
+    # focus_slot has just shown the slot on every work output.
+    def run_on_create(scope)
+      return unless scope.project
+      if scope.project["dir"]
+        scope.dir # runs setup when the directory is missing
+      elsif scope.project["setup"]
+        run_setup(scope)
+      end
+      launcher = Launcher.new(sway, timeout: config["launch_timeout"])
+      scope.project.fetch("on_create", []).each { |key| run_action(scope, key, launcher: launcher) }
     ensure
       launcher&.close
     end
@@ -503,7 +707,7 @@ module SwayContext
       prune_empty(keep: [slot])
       save_state
       puts "#{slot}  #{name}"
-      run_template(slot, name) if created
+      run_on_create(scope_for(slot, name)) if created
     end
 
     # Name (or rename) the current slot. Whatever is on the slot's workspaces,
@@ -524,9 +728,9 @@ module SwayContext
       end
       save_state
       puts "#{slot}  #{name}"
-      run_template(slot, name) unless renaming
+      run_on_create(scope_for(slot, name)) unless renaming
     end
-    
+
     def cmd_close(*args)
       kill = args.delete("--kill")
       name = args.first
@@ -549,6 +753,62 @@ module SwayContext
       contexts.each { |slot, name| apply_names(slot, name) }
       save_state
     end
+
+    # Run an action in the current context; without a key, offer a menu.
+    def cmd_run(key = nil)
+      scope = current_scope
+      keys = scope.actions.keys.sort
+      raise Error, "no actions configured" if keys.empty?
+      if key.nil?
+        lines = keys.map { |k| format("%-14s %s", k, scope.actions[k]["description"].to_s).rstrip }
+        choice = menu(lines, prompt: scope.name || "run") or return
+        key = lines.index(choice) ? keys[lines.index(choice)] : choice.strip
+      end
+      launcher = Launcher.new(sway, timeout: config["launch_timeout"])
+      run_action(scope, key, launcher: launcher)
+    ensure
+      launcher&.close
+    end
+
+    # Print the current context's environment for `eval` in a shell.
+    def cmd_env(*flags)
+      env = current_scope.env
+      env.each do |k, v|
+        puts flags.include?("--fish") ? "set -gx #{k} #{Shellwords.escape(v)}" : "export #{k}=#{Shellwords.escape(v)}"
+      end
+    end
+
+    def cmd_dir
+      scope = current_scope
+      puts(scope.dir || raise(Error, scope.dir_problem))
+    end
+
+    # Show how a context name resolves: project, vars, env, dir and actions. Dry run.
+    def cmd_show(name = nil)
+      slot = name ? context_by_name(name) : current_slot
+      name ||= contexts[slot] or raise Error, "the current slot has no context; pass a name"
+      scope = Scope.new(self, name: name, slot: slot || 0, dry_run: true)
+      puts "context: #{name}  slot: #{slot || '(none, assuming 0)'}"
+      if scope.project
+        puts "project: #{scope.project_label}  match: #{scope.project["match"]}"
+        scope.vars.each { |k, v| puts "  {#{k}} = #{v}" }
+        spec = scope.project["dir"]
+        dir = spec && scope.lookup_dir
+        puts "dir: #{spec.is_a?(Array) ? spec.join(' ') : spec} -> #{dir || "not found#{scope.project["setup"] ? ', would run setup' : ''}"}" if spec
+        puts "on_create: #{scope.project.fetch("on_create", []).join(', ')}"
+      else
+        puts "project: none"
+      end
+      env = scope.env
+      puts "env: #{env.map { |k, v| "#{k}=#{v}" }.join(' ')}"
+      puts "actions:"
+      scope.actions.sort.each do |key, action|
+        argv = action["launch"].map { |a| scope.expand(a.to_s) }
+        where = action["window"] == false ? "no window" : "output #{action["output"] || 'focused'}"
+        puts format("  %-14s %s  [%s]", key, argv.join(" "), where)
+      end
+      puts "env files #{config["launch_env_files"].inspect}: #{launch_env.keys.join(', ')}" unless launch_env.empty?
+    end
   end
 
   USAGE = <<~TXT
@@ -561,8 +821,11 @@ module SwayContext
                         or rename an existing one (aliases: rename, adopt)
       close [name] [--kill]
                         forget a context; with --kill also close its windows
+      run [action]      run an action in the current context; without an action, show a menu
+      env [--fish]      print the current context's environment for eval
+      dir               print the current context's project directory
+      show [name]       show project, vars, env, dir and actions for a context (dry run)
       list              show slots, names and window counts
-      template <name>   show what the matching template would launch (dry run)
       current           print the current context name (for bars)
       sync              re-apply stored names to workspaces (after sway restart)
 
@@ -579,8 +842,11 @@ module SwayContext
     when "new"     then m.cmd_new(*args)
     when "name", "rename", "adopt" then m.cmd_name(*args)
     when "close"   then m.cmd_close(*args)
+    when "run"     then m.cmd_run(*args)
+    when "env"     then m.cmd_env(*args)
+    when "dir"     then m.cmd_dir
+    when "show", "template" then m.cmd_show(*args)
     when "list"    then m.cmd_list
-    when "template" then m.cmd_template(*args)
     when "next"    then m.cmd_cycle(1)
     when "prev"    then m.cmd_cycle(-1)
     when "current" then m.cmd_current
