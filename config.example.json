@@ -75,6 +75,15 @@
         "-c",
         "cd {repo} && wt remove -y --foreground {branch}"
       ]
+    },
+    "kill": {
+      "description": "close all windows of this context and forget it",
+      "window": false,
+      "launch": [
+        "~/bin/sway-context",
+        "kill",
+        "{name}"
+      ]
     }
   },
   "projects": [
