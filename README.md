@@ -25,7 +25,8 @@ name shows up in waybar and `swaysome focus N` keeps working unchanged.
     sway-context dir             print the current context's project directory
     sway-context show [name]     show how a context resolves: project, vars, env, dir, actions (dry run)
 
-Without an argument, `switch`, `new`, `name` and `run` prompt via rofi.
+Without an argument, `switch`, `new`, `name` and `run` prompt via rofi. Any dmenu-like
+program works: set `"menu": ["noctalia", "dmenu"]` for the noctalia launcher, for example.
 
 ## Install
 

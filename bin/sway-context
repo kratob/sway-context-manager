@@ -99,7 +99,8 @@ module SwayContext
     # a launched program opens no window. [] disables notifications.
     "notify" => ["notify-send", "-u", "critical", "-a", "sway-context"],
     # Command used for menus and prompts. Must read choices on stdin and
-    # print the chosen (or typed) line on stdout, like rofi -dmenu.
+    # print the chosen (or typed) line on stdout, like rofi -dmenu; -p PROMPT
+    # is appended. Noctalia users: ["noctalia", "dmenu"].
     "menu" => ["rofi", "-dmenu", "-i"],
     # Slots handed out to new contexts, in order of preference.
     "slots" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 0],
@@ -660,9 +661,10 @@ module SwayContext
 
     # ----- menu --------------------------------------------------------------
 
+    # filter: text to prefill the input with; only rofi supports that.
     def menu(lines, prompt:, filter: nil)
       cmd = config["menu"] + ["-p", prompt]
-      cmd += ["-filter", filter] if filter
+      cmd += ["-filter", filter] if filter && File.basename(config["menu"].first.to_s) == "rofi"
       out, status = Open3.capture2(*cmd, stdin_data: lines.join("\n"))
       choice = out.strip
       return nil if !status.success? && choice.empty?
