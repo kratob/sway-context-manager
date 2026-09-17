@@ -95,7 +95,14 @@
       "match": "^proj-(\\d+)$",
       "vars": {
         "issue_url": "https://tracker.example.com/issue/{1}"
-      }
+      },
+      "dir": [
+        "sh",
+        "-c",
+        "git -C {repo} worktree list --porcelain | grep -B2 -x \"branch refs/heads/{branch}\" | sed -n 's/^worktree //p'"
+      ],
+      "setup": "worktree",
+      "teardown": "worktree-remove"
     },
     {
       "name": "proj",
@@ -109,17 +116,11 @@
         "TEST_ENV_NUMBER": "{slot}",
         "PORT": "300{slot}"
       },
-      "dir": [
-        "sh",
-        "-c",
-        "git -C {repo} worktree list --porcelain | grep -B2 -x \"branch refs/heads/{branch}\" | sed -n 's/^worktree //p'"
-      ],
-      "setup": "worktree",
       "on_create": [
         "editor",
         "tracker"
       ],
-      "teardown": "worktree-remove"
+      "dir": "~/src/myproject"
     }
   ]
 }
