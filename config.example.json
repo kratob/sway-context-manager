@@ -48,12 +48,12 @@
       "output": -1
     },
     "worktree": {
-      "description": "create the worktree branch if needed",
+      "description": "create the worktree if needed",
       "window": false,
       "launch": [
         "sh",
         "-c",
-        "cd {repo} && B={branch} && if git show-ref --verify -q \"refs/heads/$B\"; then wt switch -y \"$B\"; else wt switch -y -c \"$B\" -b origin/master; fi"
+        "cd {repo} && B={branch} && if git show-ref --verify -q \"refs/heads/$B\"; then wt switch -y \"$B\" --config-set 'worktree-path = \"{worktree_path}\"'; else wt switch -y -c \"$B\" -b origin/master --config-set 'worktree-path = \"{worktree_path}\"'; fi"
       ],
       "hidden": true
     },
@@ -74,7 +74,7 @@
       "launch": [
         "sh",
         "-c",
-        "cd {repo} && wt remove -y --foreground {branch}"
+        "cd {repo} && wt remove -y --foreground {worktree_path}"
       ],
       "hidden": true
     },
@@ -94,13 +94,10 @@
       "extends": "proj",
       "match": "^proj-(\\d+)$",
       "vars": {
-        "issue_url": "https://tracker.example.com/issue/{1}"
+        "issue_url": "https://tracker.example.com/issue/{1}",
+        "worktree_path": "{repo}.{name}"
       },
-      "dir": [
-        "sh",
-        "-c",
-        "git -C {repo} worktree list --porcelain | grep -B2 -x \"branch refs/heads/{branch}\" | sed -n 's/^worktree //p'"
-      ],
+      "dir": "{worktree_path}",
       "setup": "worktree",
       "teardown": "worktree-remove"
     },

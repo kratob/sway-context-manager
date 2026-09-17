@@ -57,7 +57,7 @@ runs automatically via `on_create`.
       "editor":   { "launch": ["zed", "{dir}"], "output": 1 },
       "tracker":  { "launch": ["google-chrome", "--new-window", "{issue_url}"], "output": -1 },
       "mr":       { "launch": ["sh", "-c", "URL=$(glab mr view \"$1\" -F json | jq -r .web_url); [ -n \"$URL\" ] || URL=$(glab repo view -F json | jq -r .web_url); exec google-chrome --new-window \"$URL\"", "sh", "{branch}"], "output": -1 },
-      "worktree": { "launch": ["sh", "-c", "cd {repo} && wt switch -y -c {branch} -b origin/master"],
+      "worktree": { "launch": ["sh", "-c", "cd {repo} && wt switch -y -c {branch} -b origin/master --config-set 'worktree-path = \"{worktree_path}\"'"],
                     "window": false }
     },
     "projects": [
@@ -69,10 +69,10 @@ runs automatically via `on_create`.
       {
         "name": "proj",
         "match": "^proj-",
-        "vars": { "repo": "~/src/myproject", "branch": "me/{name}",
+        "vars": { "repo": "~/src/myproject", "branch": "me/{name}", "worktree_path": "{repo}.{name}",
                   "issue_url": "https://tracker.example.com/board" },
         "env": { "TEST_ENV_NUMBER": "{slot}" },
-        "dir": ["sh", "-c", "git -C {repo} worktree list --porcelain | grep -B2 -x \"branch refs/heads/{branch}\" | sed -n 's/^worktree //p'"],
+        "dir": "{worktree_path}",
         "setup": "worktree",
         "on_create": ["editor", "tracker"]
       }
@@ -113,7 +113,9 @@ runs automatically via `on_create`.
   that must differ between contexts running at the same time (test databases, ports).
 - `dir` is either a path template or an argv whose stdout is the path. If the directory does
   not exist, `setup` (an action name or an argv) is run once and the lookup retried. This
-  is how worktrees get created on demand without hardwiring any particular tool.
+  is how worktrees get created on demand without hardwiring any particular tool. Naming the
+  worktree path yourself (as above, via worktrunk's `--config-set worktree-path`) keeps the
+  directory tied to the context even when you check out someone else's branch in it.
 - `teardown` is the inverse (an action name or an argv), run by `sway-context teardown` when
   the directory exists. If it fails, nothing else happens: e.g. `wt remove` refuses a worktree
   with uncommitted changes, so the context and its windows stay. `close` and automatic
