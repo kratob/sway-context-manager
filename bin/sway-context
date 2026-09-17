@@ -505,9 +505,14 @@ module SwayContext
       sway.run("focus output #{back_to.name}")
     end
 
+    # Close every window on the slot's workspaces. Workspaces without windows
+    # are skipped: sway answers "No matching node" for them, which is no error.
     def kill_windows(slot)
       work_workspaces(slot).each do |w|
+        next if windows_by_workspace[w.num].empty?
         sway.run(%([workspace="^#{Regexp.escape(w.name)}$"] kill))
+      rescue Error => e
+        raise unless e.message.include?("No matching node")
       end
     end
 
