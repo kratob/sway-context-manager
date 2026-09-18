@@ -16,8 +16,7 @@
     6,
     7,
     8,
-    9,
-    0
+    9
   ],
   "launch_timeout": 15,
   "launch_env_files": [
@@ -110,8 +109,9 @@
         "issue_url": "https://tracker.example.com/board"
       },
       "env": {
-        "TEST_ENV_NUMBER": "{slot}",
-        "PORT": "300{slot}"
+        "CONTEXT_NUMBER": "{slot}",
+        "TEST_ENV_NUMBER": "{slot + 1}",
+        "PORT": "{3000 + slot}"
       },
       "on_create": [
         "editor",

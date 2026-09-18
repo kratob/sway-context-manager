@@ -37,7 +37,7 @@ program works: set `"menu": ["noctalia", "dmenu"]` for the noctalia launcher, fo
 
 Keys (see `sway/context.conf`): `$mod+x` switch or create, `$mod+Shift+x` close current (windows stay),
 `$mod+Control+x` name or rename the current slot, `$mod+Tab` / `$mod+Shift+Tab` next / previous context,
-`$mod+p` menu of actions for the current context, `$mod+Shift+Return` terminal in the current context.
+`$mod+p` menu of actions for the current context, `$mod+Return` terminal in the current context.
 
 ## Outputs
 
@@ -71,7 +71,7 @@ runs automatically via `on_create`.
         "match": "^proj-",
         "vars": { "repo": "~/src/myproject", "branch": "me/{name}", "worktree_path": "{repo}.{name}",
                   "issue_url": "https://tracker.example.com/board" },
-        "env": { "TEST_ENV_NUMBER": "{slot}" },
+        "env": { "CONTEXT_NUMBER": "{slot}", "TEST_ENV_NUMBER": "{slot + 1}", "PORT": "{3000 + slot}" },
         "dir": "{worktree_path}",
         "setup": "worktree",
         "on_create": ["editor", "tracker"]
@@ -83,7 +83,8 @@ runs automatically via `on_create`.
 - `launch` is the argv. Every argument may use placeholders: `{name}` (context name),
   `{slot}` (slot number, a small integer unique among live contexts), `{rest}` (the name
   after the project match), `{1}`..`{9}` (capture groups), `{dir}` (project directory) and
-  any key of the project's `vars`. Unknown `{…}` are left alone; a leading `~` is expanded.
+  any key of the project's `vars`. Integer arithmetic over them works too: `{3000 + slot}`.
+  Unknown `{…}` are left alone; a leading `~` is expanded.
 - Everything launched runs in `dir` (if the project has one) with the project's `env` plus
   `SWAY_CONTEXT`, `SWAY_CONTEXT_SLOT` and `SWAY_CONTEXT_DIR`. So a terminal opened via an
   action already sits in the right directory with the right variables, and an editor started
@@ -110,7 +111,10 @@ runs automatically via `on_create`.
   is overridden. This keeps per-issue and per-project variants to a few lines.
 - `vars` are placeholder values and may themselves use placeholders (and earlier vars).
 - `env` is exported to everything launched in the context. `{slot}` is handy for anything
-  that must differ between contexts running at the same time (test databases, ports).
+  that must differ between contexts running at the same time: `TEST_ENV_NUMBER` for
+  parallel_tests style databases (`{slot + 1}`, since the first number is the empty one),
+  `PORT` for dev servers. Projects only need env-driven defaults, so colleagues without
+  sway-context see no difference.
 - `dir` is either a path template or an argv whose stdout is the path. If the directory does
   not exist, `setup` (an action name or an argv) is run once and the lookup retried. This
   is how worktrees get created on demand without hardwiring any particular tool. Naming the

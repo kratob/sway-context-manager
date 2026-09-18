@@ -68,8 +68,8 @@ module SwayContext
     #                 name and usable as a setup/teardown hook)
     # Placeholders: {name} context name, {slot} slot number, {rest} name after
     # the project match, {1}..{9} capture groups, {dir} project directory, and
-    # every key of the project's "vars". Unknown {…} are left untouched; a
-    # leading ~ is expanded.
+    # every key of the project's "vars". Integer arithmetic over them works:
+    # {3000 + slot}. Unknown {…} are left untouched; a leading ~ is expanded.
     #   "terminal" => { "launch" => ["kitty"] },
     #   "editor"   => { "launch" => ["zed", "{dir}"], "output" => 1 }
     "actions" => {},
@@ -103,7 +103,7 @@ module SwayContext
     # is appended. Noctalia users: ["noctalia", "dmenu"].
     "menu" => ["rofi", "-dmenu", "-i"],
     # Slots handed out to new contexts, in order of preference.
-    "slots" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 0],
+    "slots" => [1, 2, 3, 4, 5, 6, 7, 8, 9],
   }.freeze
 
   class Error < StandardError; end
@@ -248,6 +248,7 @@ module SwayContext
   # environment, directory and available actions.
   class Scope
     PLACEHOLDER = /\{([A-Za-z_]\w*|\d)\}/
+    ARITHMETIC  = /\{([\w\s+\-*\/%()]*[+\-*\/%][\w\s+\-*\/%()]*)\}/
 
     attr_reader :manager, :name, :slot, :project, :match
 
@@ -279,9 +280,16 @@ module SwayContext
       end
     end
 
-    # Replace known {placeholders}; unknown ones stay. Expands a leading ~.
+    # Replace known {placeholders}; unknown ones stay. {3000 + slot} style
+    # integer arithmetic over placeholders is evaluated. Expands a leading ~.
     def expand(str, table = vars_with_dir(str))
       out = str.gsub(PLACEHOLDER) { |m| table.key?($1) ? table[$1] : m }
+      out = out.gsub(ARITHMETIC) do |m|
+        expr = $1.gsub(/[A-Za-z_]\w*/) { |k| table.key?(k) ? table[k] : k }
+        expr.match?(/\A[\d\s+\-*\/%()]+\z/) ? Integer(eval(expr)).to_s : m
+      rescue StandardError
+        m
+      end
       out.start_with?("~/") || out == "~" ? File.expand_path(out) : out
     end
 
@@ -866,8 +874,9 @@ module SwayContext
     def cmd_show(name = nil)
       slot = name ? context_by_name(name) : current_slot
       name ||= contexts[slot] or raise Error, "the current slot has no context; pass a name"
-      scope = Scope.new(self, name: name, slot: slot || 0, dry_run: true)
-      puts "context: #{name}  slot: #{slot || '(none, assuming 0)'}"
+      assumed = config["slots"].first
+      scope = Scope.new(self, name: name, slot: slot || assumed, dry_run: true)
+      puts "context: #{name}  slot: #{slot || "(none, assuming #{assumed})"}"
       if scope.project
         puts "project: #{scope.project_label}  match: #{scope.project["match"]}"
         scope.vars.each { |k, v| puts "  {#{k}} = #{v}" }
