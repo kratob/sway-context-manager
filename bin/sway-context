@@ -403,7 +403,14 @@ module SwayContext
     # Output by position index; negative counts from the right.
     def output_at(index) = outputs[index]
 
+    # An output listed in ambient_outputs, unless every active output is:
+    # then (e.g. a laptop undocked) they all count as work outputs.
     def ambient?(output)
+      return false if outputs.all? { |o| listed_ambient?(o) }
+      listed_ambient?(output)
+    end
+
+    def listed_ambient?(output)
       config["ambient_outputs"].any? do |spec|
         spec.is_a?(Integer) ? output_at(spec)&.name == output.name : spec == output.name
       end

@@ -44,6 +44,8 @@ Keys (see `sway/context.conf`): `$mod+x` switch or create, `$mod+Shift+x` close 
 Outputs are addressed by position: all active outputs sorted left to right, index 0
 being the leftmost and -1 the rightmost. `ambient_outputs` lists the indexes (or sway
 output names) that do not take part in contexts; every other output is a work output.
+If every active output is ambient, for example an undocked laptop, all of them count as work
+outputs, so contexts keep working on the single screen.
 
 ## Projects and actions
 
